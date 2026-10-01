@@ -5,11 +5,26 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: SDK prüfen
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "sdk/Sources/Cpp/apiPlugin.h")) {
+            Write-Error "apiPlugin.h fehlt unter sdk/Sources/Cpp (evtl. von .gitignore ausgeschlossen)"
+            exit 1
+          }
+
       - name: Configure
-        run: cmake -S . -B build -A x64 -DAIMP_SDK_DIR="${{ github.workspace }}/sdk"
+        run: cmake -S . -B build -A x64 -DAIMP_SDK_DIR:PATH="${{ github.workspace }}/sdk/Sources/Cpp"
+
       - name: Build
         run: cmake --build build --config Release
+
+      - name: DLL anzeigen
+        run: dir build\Release
+
       - uses: actions/upload-artifact@v4
         with:
-          name: aimp_rate_changer
-          path: build/Release/aimp_rate_changer.dll
+          name: AIMP_AutoRate
+          path: build/Release/AIMP_AutoRate.dll
+          if-no-files-found: error
