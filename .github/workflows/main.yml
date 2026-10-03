@@ -1,30 +1,124 @@
-name: Build DLL
-on: [push, workflow_dispatch]
+name: Build
+on: [push, pull_request, workflow_dispatch]
+
 jobs:
-  build:
+  # Windows with MSVC (32 and 64 bit). The AIMP SDK headers are in sdk/.
+  windows-msvc:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, Win32]
     steps:
       - uses: actions/checkout@v4
-
-      - name: SDK prüfen
-        shell: pwsh
-        run: |
-          if (-not (Test-Path "sdk/Sources/Cpp/apiPlugin.h")) {
-            Write-Error "apiPlugin.h fehlt unter sdk/Sources/Cpp (evtl. von .gitignore ausgeschlossen)"
-            exit 1
-          }
-
       - name: Configure
-        run: cmake -S . -B build -A x64 -DAIMP_SDK_DIR:PATH="${{ github.workspace }}/sdk/Sources/Cpp"
-
+        run: cmake -S . -B build -A ${{ matrix.arch }}
       - name: Build
         run: cmake --build build --config Release
-
-      - name: DLL anzeigen
-        run: dir build\Release
-
+      - name: Check exports
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe | Select-Object -First 1
+          $out = & $dumpbin.FullName /exports build\Release\PreventResampling.dll | Out-String
+          Write-Output $out
+          if ($out -notmatch '(?m)\sAIMPPluginGetHeader(\s|$)') { Write-Error "Export AIMPPluginGetHeader is missing"; exit 1 }
+          if ($out -notmatch '(?m)\sRestartAimpW(\s|$)') { Write-Error "Export RestartAimpW is missing"; exit 1 }
+      - name: Install
+        run: cmake --install build --config Release --prefix dist
       - uses: actions/upload-artifact@v4
         with:
-          name: AIMP_AutoRate
-          path: build/Release/AIMP_AutoRate.dll
+          name: PreventResampling-msvc-${{ matrix.arch }}
+          path: dist
           if-no-files-found: error
+
+  # Linux: native .so + mock host test, Windows DLLs via MinGW, test of the DLL under Wine,
+  # then one plugin package for all platforms.
+  linux-and-package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build libcairo2-dev mingw-w64 wine64
+      - name: Linux (x64)
+        run: |
+          cmake -S . -B build/linux -G Ninja -DAR_BUILD_TESTS=ON
+          cmake --build build/linux
+          ctest --test-dir build/linux --output-on-failure
+          cmake --install build/linux --prefix dist
+      - name: Windows (x64, MinGW)
+        run: |
+          cmake -S . -B build/win64 -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-x86_64.cmake
+          cmake --build build/win64
+          cmake --install build/win64 --prefix dist
+      - name: Windows (x86, MinGW)
+        run: |
+          cmake -S . -B build/win32 -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-i686.cmake
+          cmake --build build/win32
+          cmake --install build/win32 --prefix dist
+      - name: Test the Windows DLL under Wine
+        run: |
+          SDK=sdk
+          x86_64-w64-mingw32-g++ -std=c++17 -O1 -DUNICODE -D_UNICODE -DNOMINMAX -Dwtoll=_wtoi64 -isystem $SDK \
+            tests/MockHost.cpp $SDK/apiTypes.cpp -o build/MockHost.exe -static -lole32 -loleaut32 -luuid
+          mkdir -p build/wine && cp build/MockHost.exe dist/PreventResampling/x64/PreventResampling.dll build/wine/
+          cd build/wine && WINEDEBUG=-all WINEPREFIX=$PWD/prefix timeout 300 /usr/lib/wine/wine64 MockHost.exe PreventResampling.dll .
+          # The restart helper (rundll32) keeps running after the test: AIMP.ini must contain 96000
+          for i in $(seq 1 30); do grep -q "Restart helper: starting AIMP" PreventResampling.log && break; sleep 1; done
+          grep -a "Restart helper" PreventResampling.log
+          iconv -f UTF-16 -t UTF-8 AIMP.ini | grep -q "DeviceFreq=96000"
+      - name: AIMP package (.aimppack)
+        run: |
+          mkdir -p pkg
+          VERSION=$(sed -n 's/^project(PreventResampling VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          python3 tools/make_aimppack.py --x86 dist/PreventResampling/PreventResampling.dll \
+            --x64 dist/PreventResampling/x64/PreventResampling.dll --linux dist/PreventResampling/x64/PreventResampling.so \
+            --out pkg/PreventResampling-$VERSION.aimppack
+          # separate downloads for manual installation (the .aimppack is the recommended way)
+          # AIMP only loads a plugin file that is directly in Plugins/<name>/ - the x64 sub-folder exists
+          # only inside the .aimppack, so every ZIP gets the flat layout
+          for p in win32:PreventResampling/PreventResampling.dll win64:PreventResampling/x64/PreventResampling.dll \
+                   linux-x64:PreventResampling/x64/PreventResampling.so; do
+            name=${p%%:*}; file=${p#*:}
+            rm -rf zipstage && mkdir -p zipstage/PreventResampling
+            cp "dist/$file" zipstage/PreventResampling/
+            (cd zipstage && zip -qr ../pkg/PreventResampling-$VERSION-$name.zip PreventResampling)
+          done
+          # release notes = the section of this version in CHANGELOG.md
+          awk -v v="## $VERSION" '$0==v{f=1;next} /^## /{f=0} f' CHANGELOG.md > pkg/notes.md
+      - name: Show package
+        run: find dist pkg -type f -exec ls -l {} \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PreventResampling-plugin
+          path: dist
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PreventResampling-aimppack
+          path: pkg
+          if-no-files-found: error
+
+  # Pushing a tag "v<version>" publishes a GitHub release with the .aimppack - the plugin's update
+  # check (About tab) finds it there. GitHub adds the SHA-256 digest of every asset automatically.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows-msvc, linux-and-package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: PreventResampling-aimppack
+          path: pkg
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Prevent Resampling ${{ github.ref_name }}
+          body_path: pkg/notes.md
+          files: |
+            pkg/*.aimppack
+            pkg/*.aimppack.sha256
+            pkg/*.zip
