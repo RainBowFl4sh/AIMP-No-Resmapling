@@ -1,196 +1,206 @@
-// AIMP AutoRate - stellt Windows-Geraeteformat (und Voicemeeter-Kette) auf die Abtastrate des Tracks.
-// Gegen AIMP SDK v6.00 (build 3083) abgeglichen.
-#include <windows.h>
-
-#include <atomic>
-#include <condition_variable>
-#include <functional>
-#include <mutex>
-#include <thread>
-
-#include "apiCore.h"
-#include "apiFileManager.h"
-#include "apiMessages.h"
-#include "apiObjects.h"
-#include "apiPlayer.h"
-#include "apiPlaylists.h"
+// AIMP Prevent Resampling - switches the output (Windows device format, ASIO, Voicemeeter engine or
+// PipeWire on Linux) to the sample rate of the current track so nothing gets resampled.
+// Built against AIMP SDK v6.00 (build 3083); compiles to a Win32/Win64 DLL and a Linux .so.
+#include "OptionsFrame.h"
 #include "apiPlugin.h"
-#include "apiThreading.h"
-#include "IUnknownImpl.h"   // SDK-Helfer: Referenzzaehler startet bei 0 (AIMP-Konvention)
 
-#include "RateController.h"
+#if defined(_MSC_VER)
+#define AR_EXPORT  // exported via PreventResampling.def (undecorated name even for 32-bit __stdcall)
+#elif defined(_WIN32)
+#define AR_EXPORT __declspec(dllexport)  // MinGW: -Wl,--kill-at strips the @4
+#else
+#define AR_EXPORT __attribute__((visibility("default")))
+#endif
 
-// Aufgabe, die im AIMP-Hauptthread laufen soll
-class Task : public IUnknownImpl<IAIMPTask> {
-    std::function<void()> fn_;
-public:
-    explicit Task(std::function<void()> f) : fn_(std::move(f)) {}
-    void WINAPI Execute(IAIMPTaskOwner*) override { fn_(); }
-};
 
-struct Job {
-    uint32_t rate = 0;
-    IAIMPPlaylistItem* item = nullptr;
-    unsigned gen = 0;
-};
-
-struct Engine {
-    IAIMPCore* core = nullptr;
-    IAIMPServicePlayer* player = nullptr;
-    IAIMPServiceMessageDispatcher* disp = nullptr;
-    IAIMPServiceThreads* threads = nullptr;
-    IAIMPMessageHook* hook = nullptr;
-    ar::Config cfg;
-
-    std::thread worker;
-    std::mutex m;
-    std::condition_variable cv;
-    bool quit = false, has = false;
-    std::atomic<bool> done{false};
-    Job job;
-    std::atomic<unsigned> gen{0};
-
-    void OnMain(std::function<void()> f) {
-        Task* t = new Task(std::move(f));
-        t->AddRef();
-        threads->ExecuteInMainThread(t, AIMP_SERVICE_THREADS_FLAGS_WAITFOR);
-        t->Release();
-    }
-
-    // Ausgabe-Einstellung von AIMP ins Log schreiben (Hilfe fuer die AimpDevice-Einstellung)
-    void LogAimpOutput() {
-        IAIMPPropertyList* pl = nullptr;
-        if (FAILED(player->QueryInterface(IID_IAIMPPropertyList, (void**)&pl)) || !pl) return;
-        IAIMPString* s = nullptr;
-        if (SUCCEEDED(pl->GetValueAsObject(AIMP_PLAYER_PROPID_OUTPUT, IID_IAIMPString, (void**)&s)) && s) {
-            static std::wstring last;
-            std::wstring cur(s->GetData(), s->GetLength());
-            if (cur != last) { ar::Log(L"AIMP-Ausgabe: %s", cur.c_str()); last = cur; }
-            s->Release();
-        }
-        pl->Release();
-    }
-
-    void OnStreamStart() {
-        if (!cfg.enabled) return;
-        IAIMPFileInfo* info = nullptr;
-        if (FAILED(player->GetInfo(&info)) || !info) return;
-        INT32 sr = 0;
-        info->GetValueAsInt32(AIMP_FILEINFO_PROPID_SAMPLERATE, &sr);
-        info->Release();
-        if (sr <= 0) return;
-        LogAimpOutput();
-        IAIMPPlaylistItem* item = nullptr;
-        player->GetPlaylistItem(&item);
-        unsigned g = ++gen;
-        std::lock_guard<std::mutex> l(m);
-        if (has && job.item) job.item->Release();  // aelteren, unbearbeiteten Job verwerfen
-        job = Job{(uint32_t)sr, item, g};
-        has = true;
-        cv.notify_one();
-    }
-
-    void Handle(const Job& j, ar::RateController& rc) {
-        ar::Chain chain = rc.Resolve();
-        uint32_t rate = rc.ChooseRate(chain, j.rate);
-        if (!rate) { ar::Log(L"Keine passende Rate fuer %u Hz", j.rate); return; }
-        if (!rc.NeedsSwitch(chain, rate)) return;  // alles schon passend -> nichts tun
-        ar::Log(L"Track %u Hz -> Umschalten auf %u Hz", j.rate, rate);
-        if (gen != j.gen) return;
-        OnMain([&] { player->Stop(); });
-        rc.Apply(chain, rate);
-        if (gen != j.gen) return;  // Nutzer hat inzwischen etwas anderes gestartet
-        OnMain([&] { if (j.item) player->Play2(j.item); });
-    }
-
-    void Run() {
-        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        ar::RateController rc(cfg);
-        for (;;) {
-            Job j;
-            {
-                std::unique_lock<std::mutex> l(m);
-                cv.wait(l, [&] { return quit || has; });
-                if (quit) break;
-                j = job;
-                has = false;
-                job.item = nullptr;
-            }
-            Handle(j, rc);
-            if (j.item) j.item->Release();
-        }
-        CoUninitialize();
-        done = true;
-    }
-};
+namespace ar {
 
 static Engine* g_engine = nullptr;
+static OptionsFrame* g_frame = nullptr;
 
-class Hook : public IUnknownImpl<IAIMPMessageHook> {
+class Hook : public ComObject<IAIMPMessageHook> {
+protected:
+    bool Supports(REFIID riid) override { return EqualGUID(riid, IID_IAIMPMessageHook); }
+
 public:
-    void WINAPI CoreMessage(DWORD msg, INT32, void*, HRESULT*) override {
-        if (msg == AIMP_MSG_EVENT_STREAM_START && g_engine) g_engine->OnStreamStart();
+    void WINAPI CoreMessage(DWORD msg, INT32 param1, void*, HRESULT*) override {
+        if (!g_engine) return;
+        if (msg == (DWORD)AIMP_MSG_EVENT_STREAM_START) g_engine->OnStreamStart();
+        else if (msg == (DWORD)AIMP_MSG_EVENT_PLAYER_STATE) g_engine->OnPlayerState(param1);
+        else if (msg == (DWORD)AIMP_MSG_EVENT_LOADED) {
+            g_engine->ResumeAfterRestart();
+            const Config& c = g_engine->cfg;
+            if (c.updateCheck && Updater::Due(c.updateInterval)) g_engine->updater.Check(false, c.updateAutoInstall);
+        }
+        else if (msg == (DWORD)AIMP_MSG_EVENT_PLAYER_UPDATE_POSITION && g_frame && g_frame->IsOpen()) g_frame->RefreshStats();
     }
 };
 
-class Plugin : public IUnknownImpl<IAIMPPlugin> {
+// Gear button in the plugin list: opens the plugin's settings page
+class SettingsDialog : public ComObject<IAIMPExternalSettingsDialog> {
+protected:
+    bool Supports(REFIID riid) override { return EqualGUID(riid, IID_IAIMPExternalSettingsDialog); }
+
 public:
+    void WINAPI Show(HWND) override {
+        auto svc = Service<IAIMPServiceOptionsDialog>(IID_IAIMPServiceOptionsDialog);
+        if (svc && g_frame) svc->FrameShow(static_cast<IAIMPOptionsDialogFrame*>(g_frame), 1);
+    }
+};
+
+class Plugin : public ComObject<IAIMPPlugin> {
+    Ptr<IAIMPServiceMessageDispatcher> disp_;
+    Ptr<IAIMPMessageHook> hook_;
+    Ptr<IAIMPOptionsDialogFrame> frame_;
+    Ptr<IAIMPExternalSettingsDialog> settings_;
+
+public:
+    Plugin() {
+        SettingsDialog* d = new SettingsDialog();
+        d->AddRef();
+        *settings_.Out() = d;
+    }
+
+    // According to the SDK, IAIMPExternalSettingsDialog is queried on the plugin object itself
+    HRESULT __unknwncall QueryInterface(REFIID riid, LPVOID* ppv) override {
+        if (ppv && EqualGUID(riid, IID_IAIMPExternalSettingsDialog) && settings_) {
+            settings_->AddRef();
+            *ppv = settings_.Get();
+            return S_OK;
+        }
+        return ComObject<IAIMPPlugin>::QueryInterface(riid, ppv);
+    }
+
     PChar WINAPI InfoGet(INT32 id) override {
         switch (id) {
-            case AIMP_PLUGIN_INFO_NAME: return const_cast<PChar>(L"AutoRate");
-            case AIMP_PLUGIN_INFO_AUTHOR: return const_cast<PChar>(L"AutoRate");
+            // Must match the name of the settings page exactly (links the plugin list entry to it)
+            case AIMP_PLUGIN_INFO_NAME: return const_cast<PChar>(AR_T(AR_PLUGIN_NAME));
+            case AIMP_PLUGIN_INFO_AUTHOR: return const_cast<PChar>(AR_T(AR_AUTHOR));
             case AIMP_PLUGIN_INFO_SHORT_DESCRIPTION:
-                return const_cast<PChar>(L"Passt Windows-Geraet und Voicemeeter automatisch an die Abtastrate an");
+                return const_cast<PChar>(AR_T("v" AR_VERSION " \u2013 switches the output sample rate to the track's rate (no resampling)"));
+            case AIMP_PLUGIN_INFO_FULL_DESCRIPTION:
+                return const_cast<PChar>(AR_T("Version " AR_VERSION ". Supports WASAPI shared, Voicemeeter (engine rate and "
+                                              "A1-A5 devices) and PipeWire on Linux; ASIO, WASAPI exclusive and DirectSound "
+                                              "via an optional, experimental AIMP restart. For AIMP 4.70, 5 and 6. Disabled after installation - "
+                                              "enable it in Preferences -> Plugins -> " AR_PLUGIN_NAME "."));
         }
         return nullptr;
     }
     DWORD WINAPI InfoGetCategories() override { return AIMP_PLUGIN_CATEGORY_ADDONS; }
 
     HRESULT WINAPI Initialize(IAIMPCore* core) override {
+        Core() = core;
+        Ptr<IAIMPString> profile;
+        tstring dir;
+        if (Succeeded(core->GetPath(AIMP_CORE_PATH_PROFILE, profile.Out())) && profile) {
+            dir = FromString(profile.Get());
+            if (!dir.empty() && dir.back() != AR_T('\\') && dir.back() != AR_T('/')) dir += AR_T("/");
+            Logger::Get().SetFile(dir + AR_T("PreventResampling.log"));
+        }
+
         auto* e = new Engine();
-        e->core = core;
-        e->cfg = ar::Config::Load();
-        if (FAILED(core->QueryInterface(IID_IAIMPServicePlayer, (void**)&e->player)) ||
-            FAILED(core->QueryInterface(IID_IAIMPServiceMessageDispatcher, (void**)&e->disp)) ||
-            FAILED(core->QueryInterface(IID_IAIMPServiceThreads, (void**)&e->threads))) {
-            ar::Log(L"AIMP-Services nicht verfuegbar");
+        e->player = Service<IAIMPServicePlayer>(IID_IAIMPServicePlayer);
+        e->threads = Service<IAIMPServiceThreads>(IID_IAIMPServiceThreads);
+        disp_ = Service<IAIMPServiceMessageDispatcher>(IID_IAIMPServiceMessageDispatcher);
+        if (!e->player || !e->threads || !disp_) {
+            // e.g. AIMP 3.60: its SDK has no threads service (AIMP 4 or newer is required)
+            Log(tstring(AR_T("AIMP services not available:")) + (e->player ? AR_T("") : AR_T(" player")) +
+                (e->threads ? AR_T("") : AR_T(" threads")) + (disp_ ? AR_T("") : AR_T(" message dispatcher")) +
+                AR_T(" - this plugin needs AIMP 4.70 or newer"));
             delete e;
+            disp_.Reset();
+            Core() = nullptr;
             return E_FAIL;
         }
+        tstring settingsDir = SettingsDir();
+        if (settingsDir.empty()) settingsDir = dir;
+        else settingsDir += AR_T(AR_SEP);
+        Ini::Get().Open(settingsDir + AR_T("PreventResampling.ini"));
+        if (!Ini::Get().Existed()) {
+            // Settings of versions before 2.5 lived in AIMP's own configuration - remove them so a
+            // new installation really starts with the defaults (plugin disabled)
+            auto c = Service<IAIMPServiceConfig>(IID_IAIMPServiceConfig);
+            if (c) {
+                for (const TChar* k : {AR_T("PreventResampling"), AR_T("AutoRate")}) {
+                    auto ks = MakeString(k);
+                    if (ks) c->Delete(ks.Get());
+                }
+                c->FlushCache();
+            }
+        }
+        e->cfg.Load();
+        if (!Ini::Get().Existed()) e->cfg.Save();  // new installation: write all defaults (plugin off)
+        e->LoadStats();
         g_engine = e;
-        e->worker = std::thread([e] { e->Run(); });
-        e->hook = new Hook();
-        e->hook->AddRef();
-        e->disp->Hook(e->hook);
-        ar::Log(L"Plugin gestartet");
+        e->Start();
+
+        Hook* h = new Hook();
+        h->AddRef();
+        *hook_.Out() = h;
+        disp_->Hook(hook_.Get());
+
+        OptionsFrame* f = new OptionsFrame(e);
+        f->AddRef();
+        *frame_.Out() = f;
+        g_frame = f;
+        core->RegisterExtension(IID_IAIMPServiceOptionsDialog, frame_.Get());
+        e->onStatsChanged = [] { if (g_frame && g_frame->IsOpen()) g_frame->RefreshStats(); };
+        e->updater.downloadDir = settingsDir.substr(0, settingsDir.size() - 1);
+        e->updater.onChanged = [] { if (g_frame && g_frame->IsOpen()) g_frame->RefreshAbout(); };
+        e->updater.onPackageOpened = [] { if (g_engine) g_engine->WatchForUpdate(); };
+
+        Log(tstring(AR_T(AR_PLUGIN_NAME " " AR_VERSION " started (")) +
+#ifdef _WIN32
+            (sizeof(void*) == 8 ? AR_T("Windows x64") : AR_T("Windows x86")) +
+#else
+            AR_T("Linux") +
+#endif
+            AR_T(")"));
+        Log(AR_T("Settings: ") + Ini::Get().Path() + (Ini::Get().Existed() ? AR_T("") : AR_T(" (new)")));
+        if (!e->cfg.enabled)
+            Log(AR_T("Plugin is disabled - enable it in Preferences -> Plugins -> " AR_PLUGIN_NAME));
+        e->aimpSync.profileDir = dir;
+        e->aimpSync.LogDiagnostics(e->player.Get());
+        e->aimpSync.LoadResume();
         return S_OK;
     }
 
     HRESULT WINAPI Finalize() override {
         Engine* e = g_engine;
         if (!e) return S_OK;
+        if (disp_ && hook_) disp_->Unhook(hook_.Get());
+        hook_.Reset();
+        if (frame_) Core()->UnregisterExtension(frame_.Get());
+        g_frame = nullptr;
+        frame_.Reset();
         g_engine = nullptr;
-        e->disp->Unhook(e->hook);
-        e->hook->Release();
-        {
-            std::lock_guard<std::mutex> l(e->m);
-            e->quit = true;
-            e->cv.notify_all();
-        }
-        for (int i = 0; i < 60 && !e->done; i++) Sleep(50);  // max. 3 s warten (Deadlock-Schutz)
-        bool finished = e->done;
-        if (finished) e->worker.join(); else e->worker.detach();
-        e->player->Release();
-        e->disp->Release();
-        e->threads->Release();
-        if (finished) delete e;  // sonst bewusst leaken, der Worker laeuft noch
+        e->onStatsChanged = nullptr;
+        e->updater.Cancel();
+        e->SaveStats();
+        bool finished = e->Stop();
+        Log(AR_T(AR_PLUGIN_NAME " stopped"));
+        if (finished) delete e;  // otherwise leak on purpose, the worker is still running
+        disp_.Reset();
+        Core() = nullptr;
         return S_OK;
     }
 
     void WINAPI SystemNotification(INT32, IUnknown*) override {}
 };
 
-extern "C" __declspec(dllexport) HRESULT WINAPI AIMPPluginGetHeader(IAIMPPlugin** header) {
-    *header = new Plugin();
+}  // namespace ar
+
+#ifdef _WIN32
+// Restart helper, called as: rundll32 PreventResampling.dll,RestartAimp <arguments>
+extern "C" AR_EXPORT void CALLBACK RestartAimpW(HWND, HINSTANCE, LPWSTR cmdLine, int) {
+    ar::win::RunRestartHelper(cmdLine);
+}
+#endif
+
+extern "C" AR_EXPORT HRESULT WINAPI AIMPPluginGetHeader(IAIMPPlugin** header) {
+    if (!header) return E_POINTER;
+    ar::Plugin* p = new ar::Plugin();
+    p->AddRef();
+    *header = p;
     return S_OK;
 }

@@ -1,0 +1,4 @@
+LIBRARY PreventResampling
+EXPORTS
+    AIMPPluginGetHeader
+    RestartAimpW

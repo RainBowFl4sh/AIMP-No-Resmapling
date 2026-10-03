@@ -1,0 +1,3 @@
+#!/bin/sh
+# Stand-in for pw-metadata in the test: only logs its arguments
+echo "$*" >> "${AR_PW_LOG:-/dev/null}"

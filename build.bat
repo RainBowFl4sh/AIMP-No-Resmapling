@@ -1,76 +1,76 @@
 @echo off
 setlocal
 REM ============================================================
-REM  AIMP AutoRate - Build-Skript (64-bit)
+REM  AIMP Prevent Resampling - build script for Windows (Visual Studio 2022)
 REM
-REM  Aufruf:
-REM    build.bat "C:\Pfad\zum\aimp_sdk\Sources\Cpp"
-REM    build.bat "C:\Pfad\zum\aimp_sdk\Sources\Cpp" install
+REM  Usage:
+REM    build.bat                      builds 32 and 64 bit (the SDK is downloaded automatically)
+REM    build.bat install              builds and installs to %ProgramFiles%\AIMP\Plugins
+REM    build.bat "C:\aimp_sdk\Sources\Cpp" [install]   use your own SDK copy
 REM
-REM  Alternativ Umgebungsvariable AIMP_SDK_DIR setzen und ohne Argument starten.
-REM  "install" kopiert die DLL nach %ProgramFiles%\AIMP\Plugins\AutoRate
-REM  (AIMP vorher beenden, Skript als Administrator starten).
+REM  Result:   dist\PreventResampling\PreventResampling.dll       (32 bit)
+REM           dist\PreventResampling\x64\PreventResampling.dll   (64 bit)
+REM  "install" copies the PreventResampling folder (close AIMP first, run as administrator).
 REM ============================================================
 
+set "SDKARG="
+set "MODE=%~1"
+if /i "%MODE%"=="install" goto :args_done
+if "%MODE%"=="" goto :args_done
 set "SDK=%~1"
-if "%SDK%"=="" set "SDK=%AIMP_SDK_DIR%"
-if "%SDK%"=="" goto :nosdk
-
+set "MODE=%~2"
 if not exist "%SDK%\apiPlugin.h" goto :badsdk
+set "SDK=%SDK:\=/%"
+set "SDKARG=-DAIMP_SDK_DIR=%SDK%"
+:args_done
 
 where cmake >nul 2>&1
 if errorlevel 1 (
-    echo [FEHLER] CMake wurde nicht gefunden. Installation: https://cmake.org/download/
+    echo [ERROR] CMake was not found. Download: https://cmake.org/download/
     exit /b 1
 )
 
-REM Backslashes fuer CMake in Slashes umwandeln
-set "SDK=%SDK:\=/%"
-
-echo [1/2] Konfiguriere Projekt ...
-cmake -S "%~dp0." -B "%~dp0build" -G "Visual Studio 17 2022" -A x64 -DAIMP_SDK_DIR="%SDK%"
-if errorlevel 1 (
-    echo [FEHLER] Konfiguration fehlgeschlagen. Ist Visual Studio 2022 mit C++-Workload installiert?
-    exit /b 1
+for %%A in (x64 Win32) do (
+    echo.
+    echo === %%A ===
+    cmake -S "%~dp0." -B "%~dp0build\%%A" -G "Visual Studio 17 2022" -A %%A %SDKARG%
+    if errorlevel 1 goto :cfgfail
+    cmake --build "%~dp0build\%%A" --config Release
+    if errorlevel 1 goto :buildfail
+    cmake --install "%~dp0build\%%A" --config Release --prefix "%~dp0dist"
+    if errorlevel 1 goto :buildfail
 )
 
-echo [2/2] Baue Release ...
-cmake --build "%~dp0build" --config Release
-if errorlevel 1 (
-    echo [FEHLER] Build fehlgeschlagen. Meldung kopieren und weitergeben.
-    exit /b 1
-)
-
-set "DLL=%~dp0build\Release\AIMP_AutoRate.dll"
-if not exist "%DLL%" (
-    echo [FEHLER] DLL nicht gefunden: %DLL%
-    exit /b 1
-)
 echo.
-echo Fertig: %DLL%
-
-if /i "%~2"=="install" goto :install
-echo Zum Installieren die DLL nach AIMP\Plugins\AutoRate\ kopieren oder "build.bat SDK-Pfad install" nutzen.
+echo Done: %~dp0dist\PreventResampling
+if /i "%MODE%"=="install" goto :install
+echo To install, copy the folder dist\PreventResampling to AIMP\Plugins\ or run "build.bat install".
 exit /b 0
 
 :install
-set "TARGET=%ProgramFiles%\AIMP\Plugins\AutoRate"
-mkdir "%TARGET%" >nul 2>&1
-copy /y "%DLL%" "%TARGET%\" >nul
+set "TARGET=%ProgramFiles%\AIMP\Plugins"
+if not exist "%TARGET%" (
+    echo [ERROR] %TARGET% not found. Please copy dist\PreventResampling to AIMP\Plugins manually.
+    exit /b 1
+)
+xcopy /e /i /y "%~dp0dist\PreventResampling" "%TARGET%\PreventResampling" >nul
 if errorlevel 1 goto :copyfail
-echo Installiert nach %TARGET%
+echo Installed to %TARGET%\PreventResampling
 exit /b 0
 
-:copyfail
-echo [FEHLER] Kopieren nach %TARGET% fehlgeschlagen. AIMP beenden und als Administrator starten.
+:cfgfail
+echo [ERROR] Configuration failed. Are Visual Studio 2022 (C++ workload) and Git installed?
 exit /b 1
 
-:nosdk
-echo [FEHLER] Kein SDK-Pfad angegeben.
-echo Aufruf: build.bat "C:\Pfad\zum\aimp_sdk\Sources\Cpp"
+:buildfail
+echo [ERROR] Build failed. Please copy the message above when reporting the problem.
+exit /b 1
+
+:copyfail
+echo [ERROR] Copying to %TARGET% failed. Close AIMP and run this script as administrator.
 exit /b 1
 
 :badsdk
-echo [FEHLER] apiPlugin.h nicht gefunden in: %SDK%
-echo Der Pfad muss auf den Ordner "Sources\Cpp" im entpackten AIMP-SDK zeigen.
+echo [ERROR] apiPlugin.h not found in: %SDK%
+echo The path must point to the "Sources\Cpp" folder of the extracted AIMP SDK (v6.00 or newer).
 exit /b 1
