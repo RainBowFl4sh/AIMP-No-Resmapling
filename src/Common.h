@@ -37,7 +37,7 @@
 #define AR_PLUGIN_NAME "Prevent Resampling"
 #define AR_AUTHOR "Fl4sh"
 #ifndef AR_VERSION
-#define AR_VERSION "2.5.4"
+#define AR_VERSION "2.5.5"
 #endif
 
 namespace ar {
@@ -75,6 +75,14 @@ inline TChar LowerChar(TChar c) {
 inline tstring Lower(tstring s) {
     for (auto& c : s) c = LowerChar(c);
     return s;
+}
+
+// Case-insensitive comparison without temporary strings
+inline bool EqualsI(const tstring& a, const tstring& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++)
+        if (LowerChar(a[i]) != LowerChar(b[i])) return false;
+    return true;
 }
 
 // Case-insensitive substring search
@@ -170,7 +178,7 @@ public:
         path_ = path;
 #ifdef _WIN32
         WIN32_FILE_ATTRIBUTE_DATA a;
-        if (GetFileAttributesExW(path_.c_str(), GetFileExInfoStandard, &a) && a.nFileSizeLow > 1024 * 1024)
+        if (GetFileAttributesExW(path_.c_str(), GetFileExInfoStandard, &a) && (a.nFileSizeHigh || a.nFileSizeLow > 1024 * 1024))
             DeleteFileW(path_.c_str());
 #else
         FILE* f = fopen(path_.c_str(), "rb");

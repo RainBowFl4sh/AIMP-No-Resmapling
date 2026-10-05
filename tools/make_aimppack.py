@@ -38,19 +38,37 @@ def main():
     ap.add_argument("--x64", required=True, help="64-bit Windows DLL")
     ap.add_argument("--linux", help="Linux x86_64 .so (optional)")
     ap.add_argument("--out", default=f"{NAME}-{version}.aimppack")
+    ap.add_argument("--topic", default="https://github.com/RainBowFl4sh/AIMP-No-Resmapling",
+                    help="link to the plugin's forum topic (description file)")
     args = ap.parse_args()
 
     for path in filter(None, [args.x86, args.x64, args.linux]):
         if not os.path.isfile(path):
             sys.exit("missing file: " + path)
 
+    # Description file in the format of the AIMP plugin catalog (forum rules, aimp.ru topic 32363):
+    # purpose, AIMP versions, name, version, author, contact, forum topic, description - English and Russian
     info = (
+        "\ufeff"
+        "Назначение: Расширения функционала\r\n"
+        "Версия: AIMP4, AIMP5, AIMP6\r\n"
+        "\r\n"
         "Name: Prevent Resampling\r\n"
         f"Version: {version}\r\n"
         "Author: Fl4sh\r\n"
-        "Topic: https://github.com/RainBowFl4sh/AIMP-No-Resmapling\r\n"
-        "Description: Switches the output sample rate to the track's rate - no resampling "
-        "(Windows x86/x64, Linux x86_64)\r\n"
+        "AuthorContact: https://github.com/RainBowFl4sh/AIMP-No-Resmapling/issues\r\n"
+        f"Topic: {args.topic}\r\n"
+        "Description: Switches the output sample rate to the sample rate of every track - no resampling "
+        "(WASAPI, Voicemeeter; ASIO / WASAPI exclusive / DirectSound via an optional AIMP restart). "
+        "Windows 32/64-bit, Linux x86_64. Disabled after installation.\r\n"
+        "Описание: Переключает частоту дискретизации вывода на частоту каждого трека - без ресемплинга "
+        "(WASAPI, Voicemeeter; ASIO / WASAPI Exclusive / DirectSound через необязательный перезапуск AIMP). "
+        "Windows 32/64-bit, Linux x86_64. После установки выключен.\r\n"
+        "\r\n"
+        "Installation: drag this archive onto the AIMP window (or open the .aimppack from GitHub with a double-click). "
+        "Restart AIMP and enable the plugin in Preferences -> Plugins -> Prevent Resampling -> General.\r\n"
+        "Установка: перетащите этот архив в окно AIMP (или откройте .aimppack с GitHub двойным щелчком). "
+        "Перезапустите AIMP и включите плагин в Настройки -> Плагины -> Prevent Resampling -> General.\r\n"
     )
     entries = [(args.x86, f"{NAME}/{NAME}.dll"), (args.x64, f"{NAME}/x64/{NAME}.dll")]
     if args.linux:
@@ -61,7 +79,7 @@ def main():
         z.writestr(f"{NAME}/x64/", b"")
         for src, dst in entries:
             z.write(src, dst)
-        z.writestr(f"{NAME}/{NAME}.txt", info)
+        z.writestr(f"{NAME}/{NAME}.txt", info.encode("utf-8"))
     digest = hashlib.sha256(open(args.out, "rb").read()).hexdigest()
     with open(args.out + ".sha256", "w") as f:
         f.write(f"{digest}  {os.path.basename(args.out)}\n")

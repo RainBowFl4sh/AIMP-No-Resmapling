@@ -6,6 +6,7 @@
 #ifndef _WIN32
 #include <spawn.h>
 #endif
+#include <cctype>
 #include <ctime>
 #include <functional>
 #include <memory>
@@ -38,7 +39,7 @@ inline int CompareVersions(const std::string& a, const std::string& b) {
         std::vector<long> r;
         long cur = -1;
         for (char c : v) {
-            if (c >= '0' && c <= '9') cur = (cur < 0 ? 0 : cur * 10) + (c - '0');
+            if (c >= '0' && c <= '9') cur = (cur < 0 ? 0 : (std::min)(cur, 99999999L) * 10) + (c - '0');  // no overflow
             else if (cur >= 0) { r.push_back(cur); cur = -1; if (c != '.') break; }
         }
         if (cur >= 0) r.push_back(cur);
@@ -50,6 +51,23 @@ inline int CompareVersions(const std::string& a, const std::string& b) {
         if (p != q) return p < q ? -1 : 1;
     }
     return 0;
+}
+
+// Files are only downloaded from this repository's releases and saved under their plain name
+inline bool IsReleaseDownload(const std::string& url) {
+    static const char prefix[] = AR_URL_RELEASES "/download/";
+    const size_t n = sizeof(prefix) - 1;
+    if (url.size() <= n) return false;
+    for (size_t i = 0; i < n; i++)
+        if (tolower((unsigned char)url[i]) != tolower((unsigned char)prefix[i])) return false;
+    return true;
+}
+
+inline bool IsPlainFileName(const std::string& name) {
+    if (name.empty() || name[0] == '.') return false;
+    for (char c : name)
+        if (!isalnum((unsigned char)c) && c != '.' && c != '-' && c != '_') return false;
+    return true;
 }
 
 class HttpEvents : public ComObject<IAIMPHTTPClientEvents> {
@@ -172,7 +190,8 @@ private:
         assetUrl_.clear(); assetName_.clear(); digest_.clear(); checksumUrl_.clear();
         for (auto& a : j["assets"].items) {
             const std::string& name = a["name"].Str();
-            if (name.size() > 9 && name.compare(name.size() - 9, 9, ".aimppack") == 0) {
+            if (name.size() > 9 && name.compare(name.size() - 9, 9, ".aimppack") == 0 && IsPlainFileName(name) &&
+                IsReleaseDownload(a["browser_download_url"].Str())) {
                 assetName_ = name;
                 assetUrl_ = a["browser_download_url"].Str();
                 std::string d = a["digest"].Str();
@@ -180,7 +199,8 @@ private:
             }
         }
         for (auto& a : j["assets"].items)
-            if (!assetName_.empty() && a["name"].Str() == assetName_ + ".sha256") checksumUrl_ = a["browser_download_url"].Str();
+            if (!assetName_.empty() && a["name"].Str() == assetName_ + ".sha256" && IsReleaseDownload(a["browser_download_url"].Str()))
+                checksumUrl_ = a["browser_download_url"].Str();
         ini.Set(AR_T("Updates"), AR_T("LatestVersion"), T(latest));
         SetFailed(false);
         ini.Save();

@@ -62,7 +62,7 @@ inline bool FindAsioDriver(const std::wstring& configured, const std::wstring& a
     auto all = ListAsioDrivers();
     if (!configured.empty()) {
         for (auto& d : all)
-            if (Lower(d.name) == Lower(configured)) { out = d; return true; }
+            if (EqualsI(d.name, configured)) { out = d; return true; }
         for (auto& d : all)
             if (ContainsI(d.name, configured)) { out = d; return true; }
         return false;

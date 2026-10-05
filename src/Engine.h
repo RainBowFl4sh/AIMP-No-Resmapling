@@ -65,6 +65,7 @@ private:
     std::thread watcher_;                   // update: waits for AIMP to install the new plugin files
     std::atomic<bool> watchStop_{false};
     bool sessionLoaded_ = false;            // worker only
+    bool waitForVm_ = false;                // worker only: switch as soon as Voicemeeter runs
     bool has_ = false;
     std::atomic<bool> done_{false};
     Job job_;
@@ -127,6 +128,7 @@ private:
     }
 
     void Handle(Job& j, RateController& rc) {
+        waitForVm_ = false;
         if (!sessionLoaded_) {
             // After a restart by the plugin: take over the original rates of the previous AIMP process
             sessionLoaded_ = true;
@@ -191,6 +193,10 @@ private:
         Decision d = rc.Prepare(t);
 #ifdef _WIN32
         if (passive && !d.vm) d.apply = d.stopPlayback = false;  // nothing to keep in sync
+        if (d.vmNotRunning) {
+            waitForVm_ = true;
+            note += tstring(note.empty() ? AR_T("") : AR_T("; ")) + AR_T("Voicemeeter is not running - switching as soon as it starts");
+        }
 #endif
         tstring vmText = rc.VoicemeeterStatus();
         stats.Update([&](Stats& s) {
@@ -304,6 +310,17 @@ private:
         }
     }
 
+    // Worker: Voicemeeter was not running for the current track - has it been started meanwhile?
+    void CheckVoicemeeterStarted() {
+#ifdef _WIN32
+        if (!win::Voicemeeter::Get().Running()) return;
+        waitForVm_ = false;
+        lastFile_.clear();  // the same track again is not a switch "without effect" now
+        Log(AR_T("Voicemeeter is running now - switching for the current track"));
+        OnMain([this] { RecheckSamePlayback(); }, false);
+#endif
+    }
+
     void Run() {
 #ifdef _WIN32
         // STA, because ASIO drivers are apartment-threaded COM objects without marshalling
@@ -314,7 +331,13 @@ private:
             Job j;
             {
                 std::unique_lock<std::mutex> l(m_);
-                cv_.wait(l, [&] { return quit_ || has_; });
+                auto ready = [&] { return quit_ || has_; };
+                if (!waitForVm_) cv_.wait(l, ready);
+                else if (!cv_.wait_for(l, std::chrono::seconds(3), ready)) {
+                    l.unlock();
+                    CheckVoicemeeterStarted();
+                    continue;
+                }
                 if (quit_) break;
                 j = std::move(job_);
                 job_ = Job();
@@ -500,6 +523,14 @@ public:
             waitingForPlay_ = false;
             OnStreamStart();
         }
+    }
+
+    // Main thread: checks the playing track again without counting it as a new track
+    void RecheckSamePlayback() {
+        handledFile_.clear();
+        if (!player || player->GetState() != AIMP_PLAYER_STATE_PLAYING) return;  // done when playback starts
+        restartFile_ = CurrentFile();
+        OnStreamStart();
     }
 
     // Main thread: checks the playing track again (e.g. after the plugin was enabled)

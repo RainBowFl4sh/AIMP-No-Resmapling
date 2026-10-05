@@ -132,7 +132,7 @@ inline bool NamesMatch(const std::wstring& busName, const std::wstring& endpoint
 
 inline bool FindByName(const std::vector<Endpoint>& all, const std::wstring& part, Endpoint& out) {
     for (auto& e : all)  // exact name first
-        if (Lower(e.name) == Lower(part)) { out = e; return true; }
+        if (EqualsI(e.name, part)) { out = e; return true; }
     for (auto& e : all)
         if (ContainsI(e.name, part)) { out = e; return true; }
     return false;
@@ -145,6 +145,12 @@ inline bool FindInText(const std::vector<Endpoint>& all, const std::wstring& tex
     for (auto& e : all)
         if (!e.name.empty() && e.name.size() > best && ContainsI(text, e.name)) { out = e; best = e.name.size(); }
     return best > 0;
+}
+
+// Only such formats are handed to Windows: cbSize must not claim more bytes than the structure holds
+inline bool PlausibleFormat(const WAVEFORMATEXTENSIBLE& f) {
+    return f.Format.nChannels > 0 && f.Format.nSamplesPerSec > 0 &&
+           f.Format.cbSize <= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
 }
 
 inline bool GetDeviceFormat(const std::wstring& id, WAVEFORMATEXTENSIBLE& fmt) {
@@ -160,7 +166,7 @@ inline bool GetDeviceFormat(const std::wstring& id, WAVEFORMATEXTENSIBLE& fmt) {
     if (SUCCEEDED(ps->GetValue(KEY_DeviceFormat, &v)) && v.vt == VT_BLOB && v.blob.cbSize >= sizeof(WAVEFORMATEX)) {
         ZeroMemory(&fmt, sizeof(fmt));
         memcpy(&fmt, v.blob.pBlobData, (std::min)((size_t)v.blob.cbSize, sizeof(fmt)));
-        ok = true;
+        ok = PlausibleFormat(fmt);
     }
     PropVariantClear(&v);
     return ok;

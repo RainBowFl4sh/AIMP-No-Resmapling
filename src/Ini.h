@@ -77,7 +77,7 @@ class Ini {
 
     Entries* Find(const tstring& section, bool create) {
         for (auto& s : sections_)
-            if (Lower(s.first) == Lower(section)) return &s.second;
+            if (EqualsI(s.first, section)) return &s.second;
         if (!create) return nullptr;
         sections_.push_back({section, Entries()});
         return &sections_.back().second;
@@ -157,7 +157,7 @@ public:
         Entries* e = Find(section, false);
         if (!e) return false;
         for (auto& kv : *e)
-            if (Lower(kv.first) == Lower(key)) return true;
+            if (EqualsI(kv.first, key)) return true;
         return false;
     }
 
@@ -165,7 +165,7 @@ public:
         Entries* e = Find(section, false);
         if (e)
             for (auto& kv : *e)
-                if (Lower(kv.first) == Lower(key)) return kv.second;
+                if (EqualsI(kv.first, key)) return kv.second;
         return def;
     }
 
@@ -185,7 +185,7 @@ public:
         for (TChar c : value) clean += (c == AR_T('\r') || c == AR_T('\n')) ? AR_T(' ') : c;
         Entries* e = Find(section, true);
         for (auto& kv : *e)
-            if (Lower(kv.first) == Lower(key)) { kv.second = clean; return; }
+            if (EqualsI(kv.first, key)) { kv.second = clean; return; }
         e->push_back({key, clean});
     }
     void Set(const tstring& section, const tstring& key, long long v) { Set(section, key, Num(v)); }

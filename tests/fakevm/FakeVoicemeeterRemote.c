@@ -2,6 +2,8 @@
 // Simulates Voicemeeter Banana: Option.sr, Option.ASIOsr, Bus[0..2].device.name/.sr and
 // Command.Restart. The state lives in C:\vmfake.ini so it survives AIMP restarts (like the real
 // Voicemeeter, which runs as its own process); every call is logged to C:\vmfake.log.
+// "running=0" in the state file simulates Voicemeeter not being started: like the real Remote API,
+// a login made meanwhile stays without connection (-2 "no server") until the client logs in again.
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
@@ -12,7 +14,7 @@
 static float optSr = 48000.0f, optAsioSr = 0.0f, engineSr = 48000.0f;
 static wchar_t busName[3][128] = {L"FiiO KA11", L"Voicemeeter Input (VB-Audio Voicemeeter VAIO)", L""};
 static long busType[3] = {3, 3, 0};  // WDM
-static int dirty = 1, loggedIn = 0;
+static int dirty = 1, loggedIn = 0, running = 1, connected = 0;
 
 static void LogF(const char* fmt, ...) {
     FILE* f = fopen(LOG_FILE, "a");
@@ -41,7 +43,8 @@ static void Load(void) {
         int i = -1;
         char kind[16] = "";
         sscanf(line, "bus%d%15s", &i, kind);
-        if (!strcmp(line, "sr")) optSr = (float)atof(v);
+        if (!strcmp(line, "running")) running = atoi(v);
+        else if (!strcmp(line, "sr")) optSr = (float)atof(v);
         else if (!strcmp(line, "asiosr")) optAsioSr = (float)atof(v);
         else if (!strcmp(line, "engine")) engineSr = (float)atof(v);
         else if (i >= 0 && i < 3 && !strcmp(kind, "name")) MultiByteToWideChar(CP_UTF8, 0, v, -1, busName[i], 128);
@@ -53,7 +56,7 @@ static void Load(void) {
 static void Save(void) {
     FILE* f = fopen(STATE_FILE, "w");
     if (!f) return;
-    fprintf(f, "sr=%.0f\nasiosr=%.0f\nengine=%.0f\n", optSr, optAsioSr, engineSr);
+    fprintf(f, "running=%d\nsr=%.0f\nasiosr=%.0f\nengine=%.0f\n", running, optSr, optAsioSr, engineSr);
     for (int i = 0; i < 3; i++) {
         char n[512];
         WideCharToMultiByte(CP_UTF8, 0, busName[i], -1, n, sizeof n, NULL, NULL);
@@ -69,25 +72,34 @@ static int BusIndex(const char* p, const char* suffix) {
     return -1;
 }
 
+// -2 = no server: not logged in, Voicemeeter not running or started after the login
+static long NoServer(void) {
+    Load();
+    if (!running) connected = 0;
+    return loggedIn && connected ? 0 : -2;
+}
+
 __declspec(dllexport) long __stdcall VBVMR_Login(void) {
     Load();
     loggedIn = 1;
+    connected = running;
     dirty = 1;
-    LogF("Login");
-    return 0;
+    LogF(running ? "Login" : "Login (Voicemeeter not running)");
+    return running ? 0 : 1;
 }
 __declspec(dllexport) long __stdcall VBVMR_Logout(void) {
     LogF("Logout (engine %.0f, Option.sr %.0f)", engineSr, optSr);
-    loggedIn = 0;
+    loggedIn = connected = 0;
     return 0;
 }
 __declspec(dllexport) long __stdcall VBVMR_IsParametersDirty(void) {
+    if (NoServer()) return -2;
     int d = dirty;
     dirty = 0;
     return d;
 }
 __declspec(dllexport) long __stdcall VBVMR_GetVoicemeeterType(long* t) {
-    if (!loggedIn) return -1;
+    if (NoServer()) return -2;
     *t = sizeof(void*) == 8 ? 5 : 2;  // Banana (x64 variant on 64-bit)
     return 0;
 }
@@ -97,7 +109,7 @@ __declspec(dllexport) long __stdcall VBVMR_GetVoicemeeterVersion(long* v) {
 }
 __declspec(dllexport) long __stdcall VBVMR_GetParameterFloat(char* p, float* v) {
     int i;
-    Load();
+    if (NoServer()) return -2;
     if (!strcmp(p, "Option.sr")) *v = optSr;
     else if (!strcmp(p, "Option.ASIOsr")) *v = optAsioSr;
     else if ((i = BusIndex(p, "sr")) >= 0) *v = busName[i][0] ? engineSr : 0.0f;
@@ -106,14 +118,14 @@ __declspec(dllexport) long __stdcall VBVMR_GetParameterFloat(char* p, float* v) 
 }
 __declspec(dllexport) long __stdcall VBVMR_GetParameterStringW(char* p, unsigned short* out) {
     int i;
-    Load();
+    if (NoServer()) return -2;
     if ((i = BusIndex(p, "name")) >= 0) { lstrcpyW((wchar_t*)out, busName[i]); return 0; }
     LogF("GetString %s -> unknown", p);
     out[0] = 0;
     return -3;
 }
 __declspec(dllexport) long __stdcall VBVMR_SetParameterFloat(char* p, float v) {
-    Load();
+    if (NoServer()) return -2;
     LogF("SetFloat %s = %.0f", p, v);
     if (!strcmp(p, "Option.sr")) optSr = v;
     else if (!strcmp(p, "Option.ASIOsr")) optAsioSr = v;
@@ -128,7 +140,7 @@ __declspec(dllexport) long __stdcall VBVMR_SetParameterFloat(char* p, float v) {
 __declspec(dllexport) long __stdcall VBVMR_SetParameterStringW(char* p, unsigned short* v) {
     int i;
     char n[256];
-    Load();
+    if (NoServer()) return -2;
     WideCharToMultiByte(CP_UTF8, 0, (wchar_t*)v, -1, n, sizeof n, NULL, NULL);
     LogF("SetString %s = %s", p, n);
     for (i = 0; i < 3; i++) {

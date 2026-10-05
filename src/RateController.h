@@ -33,6 +33,7 @@ struct Decision {
 #ifdef _WIN32
     std::vector<win::Endpoint> targets;  // order: extra devices, Voicemeeter outputs, AIMP's device LAST
     bool vm = false, vmEngine = false;
+    bool vmNotRunning = false;  // the output goes to Voicemeeter, but Voicemeeter is not running (yet)
     bool asioDirect = false;
     win::AsioDriver asio;
 #endif
@@ -133,7 +134,9 @@ public:
 
         // Voicemeeter: hardware outputs A1 (or A1..A5) are mapped to Windows devices by name
         auto& vm = win::Voicemeeter::Get();
-        if (cfg_.vmEnabled && ((havePrimary && primary.IsVB()) || vbAsio) && vm.Running()) {
+        bool toVm = cfg_.vmEnabled && ((havePrimary && primary.IsVB()) || vbAsio);
+        if (toVm && !vm.Running()) d.vmNotRunning = vm.Installed();
+        else if (toVm) {
             d.vm = true;
             d.vmEngine = cfg_.vmEngineRate;
             for (auto& bus : vm.BusDevices(cfg_.vmAllBuses))
@@ -160,33 +163,35 @@ public:
             return d;
         }
 
+        // Current format of every target, read once (each read opens the device list again)
+        std::vector<WAVEFORMATEXTENSIBLE> formats(d.targets.size());
+        std::vector<bool> known(d.targets.size());
+        for (size_t i = 0; i < d.targets.size(); i++) known[i] = win::GetDeviceFormat(d.targets[i].id, formats[i]);
+
         // Choose a rate every device supports
-        auto supports = [&](const win::Endpoint& e, uint32_t hz) {
-            if (e.IsVB()) return true;  // virtual drivers accept any rate
-            WAVEFORMATEXTENSIBLE f;
-            if (!win::GetDeviceFormat(e.id, f)) return false;
+        auto supports = [&](size_t i, uint32_t hz) {
+            if (d.targets[i].IsVB()) return true;  // virtual drivers accept any rate
+            if (!known[i]) return false;
             // -1 = unknown (e.g. held exclusively by Voicemeeter) -> try anyway
-            return win::SupportsExclusive(e.id, win::WithRate(f, hz)) != 0;
+            return win::SupportsExclusive(d.targets[i].id, win::WithRate(formats[i], hz)) != 0;
         };
         for (uint32_t c : Candidates(t.rate)) {
             if (d.vmEngine && !win::Voicemeeter::EngineSupports(c)) continue;
             bool ok = true;
-            for (auto& e : d.targets) if (!supports(e, c)) { ok = false; break; }
+            for (size_t i = 0; i < d.targets.size(); i++) if (!supports(i, c)) { ok = false; break; }
             if (ok) { d.rate = c; break; }
         }
         if (!d.rate && !d.targets.empty()) {  // fallback: only the last device (AIMP's target) must support it
             for (uint32_t c : Candidates(t.rate))
-                if (supports(d.targets.back(), c) && (!d.vmEngine || win::Voicemeeter::EngineSupports(c))) { d.rate = c; break; }
+                if (supports(d.targets.size() - 1, c) && (!d.vmEngine || win::Voicemeeter::EngineSupports(c))) { d.rate = c; break; }
         }
         if (!d.rate) return d;
 
         // Does anything have to change at all?
-        for (auto& e : d.targets) {
-            WAVEFORMATEXTENSIBLE f;
-            if (win::GetDeviceFormat(e.id, f)) {
-                if (!d.currentRate) d.currentRate = f.Format.nSamplesPerSec;
-                if (f.Format.nSamplesPerSec != d.rate) d.apply = true;
-            }
+        for (size_t i = 0; i < d.targets.size(); i++) {
+            if (!known[i]) continue;
+            if (!d.currentRate) d.currentRate = formats[i].Format.nSamplesPerSec;
+            if (formats[i].Format.nSamplesPerSec != d.rate) d.apply = true;
         }
         if (d.vmEngine) {
             uint32_t known = vmSet_ ? vmSet_ : vm.PreferredRate();
@@ -349,8 +354,14 @@ public:
             if (v.empty() || bar == std::wstring::npos || v.size() - bar - 1 != sizeof(WAVEFORMATEXTENSIBLE) * 2) continue;
             WAVEFORMATEXTENSIBLE f;
             unsigned char* b = (unsigned char*)&f;
-            auto nib = [](wchar_t c) { return c >= L'a' ? c - L'a' + 10 : c - L'0'; };
-            for (size_t k = 0; k < sizeof(f); k++) b[k] = (unsigned char)(nib(v[bar + 1 + 2 * k]) << 4 | nib(v[bar + 2 + 2 * k]));
+            auto nib = [](wchar_t c) { return c >= L'0' && c <= L'9' ? c - L'0' : c >= L'a' && c <= L'f' ? c - L'a' + 10 : -1; };
+            bool valid = true;
+            for (size_t k = 0; k < sizeof(f) && valid; k++) {
+                int hi = nib(v[bar + 1 + 2 * k]), lo = nib(v[bar + 2 + 2 * k]);
+                valid = hi >= 0 && lo >= 0;
+                b[k] = (unsigned char)(hi << 4 | lo);
+            }
+            if (!valid || !win::PlausibleFormat(f)) continue;  // damaged entry: never hand it to Windows
             if (!original_.count(v.substr(0, bar))) original_[v.substr(0, bar)] = f;
             n++;
         }

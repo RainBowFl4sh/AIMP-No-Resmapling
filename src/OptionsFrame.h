@@ -355,7 +355,7 @@ public:
 #ifdef _WIN32
         Label(o, AR_T("Windows device:"), 10, y + 3, 195);
         coWinDev_ = Combo(o, 210, y, 255);                                                                   y += 28;
-        Label(o, AR_T("Used for WASAPI shared and DirectSound; automatic = taken from AIMP's output."), 10, y, 455, 34);
+        Label(o, AR_T("Used for WASAPI shared and DirectSound. Automatic = the device of AIMP's output, otherwise the Windows default device."), 10, y, 455, 34);
         y += 40;
         Label(o, AR_T("Additional devices to switch:"), 10, y + 3, 195);
         edExtra_ = Make<IAIMPUIEdit>(o, IID_IAIMPUIEdit, 210, y, 255, kRowH);                                y += 28;
@@ -538,12 +538,12 @@ public:
                              AR_T("WASAPI exclusive (event / push)"), AR_T("ASIO"), AR_T("DirectSound")});
 
         winDevices_.clear();
-        std::vector<tstring> items{AR_T("(automatic: from AIMP's output, otherwise the Windows default device)")};
+        std::vector<tstring> items{AR_T("Automatic (from AIMP's output)")};
         for (auto& e : win::ListRender()) { winDevices_.push_back(e.name); items.push_back(e.name); }
         Fill(coWinDev_.Get(), items);
 
         asioDrivers_.clear();
-        items = {AR_T("(automatic: from AIMP's output)")};
+        items = {AR_T("Automatic (from AIMP's output)")};
         for (auto& d : win::ListAsioDrivers()) { asioDrivers_.push_back(d.name); items.push_back(d.name); }
         Fill(coAsio_.Get(), items);
 

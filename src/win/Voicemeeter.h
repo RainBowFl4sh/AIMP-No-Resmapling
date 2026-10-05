@@ -1,6 +1,7 @@
 // Voicemeeter Remote API (VoicemeeterRemote.dll / VoicemeeterRemote64.dll).
-// VB-Audio says login/logout should happen exactly once per process, therefore there is one
-// shared, thread-safe session for the whole lifetime of the plugin.
+// VB-Audio says login/logout should happen once per process, therefore there is one shared,
+// thread-safe session for the whole lifetime of the plugin. Exception: if Voicemeeter is started
+// after the login, the session does not see it - then the plugin logs in again (see Type()).
 #pragma once
 #include "../Common.h"
 
@@ -31,6 +32,7 @@ class Voicemeeter {
     std::recursive_mutex m_;
     HMODULE h_ = nullptr;
     bool tried_ = false, loggedIn_ = false;
+    int64_t lastLogin_ = 0;
     T_Void login_ = nullptr, logout_ = nullptr, dirty_ = nullptr, outNum_ = nullptr;
     T_GetLong getType_ = nullptr, getVersion_ = nullptr;
     T_GetFloat getFloat_ = nullptr;
@@ -92,6 +94,7 @@ class Voicemeeter {
             return false;
         }
         long r = login_();
+        lastLogin_ = NowMs();
         if (r < 0) { Log(L"Voicemeeter: login error " + Num(r)); return false; }
         loggedIn_ = true;
         return true;
@@ -124,9 +127,18 @@ public:
     // 0 = not running, 1 = Standard, 2 = Banana, 3 = Potato
     long Type() {
         std::lock_guard<std::recursive_mutex> g(m_);
-        if (!Load() || !loggedIn_) return 0;
+        if (!Load()) return 0;
         long t = 0;
-        if (getType_(&t) != 0) return 0;
+        bool ok = loggedIn_ && getType_(&t) == 0;
+        if (!ok && NowMs() - lastLogin_ >= 3000) {
+            // Not reachable: Voicemeeter may have been started after the login (at most every 3 s)
+            if (loggedIn_) logout_();
+            loggedIn_ = login_() >= 0;
+            lastLogin_ = NowMs();
+            ok = loggedIn_ && getType_(&t) == 0;
+            if (ok) Log(L"Voicemeeter: connected (it was started after AIMP)");
+        }
+        if (!ok) return 0;
         if (t >= 4 && t <= 6) t -= 3;  // x64 variants
         return (t >= 1 && t <= 3) ? t : 0;
     }

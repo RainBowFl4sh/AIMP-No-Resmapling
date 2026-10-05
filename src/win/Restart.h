@@ -7,7 +7,8 @@
 //      exactly the same place and z-order ("freeze frame"), so AIMP seems to stay open.
 //   3. The helper waits until AIMP has exited (AIMP still writes its settings while closing), writes
 //      the new rate into AIMP.ini and starts AIMP again.
-//   4. As soon as the new AIMP window is visible, the still image fades out.
+//   4. As soon as the new AIMP window is visible, windows that were maximized before are maximized
+//      again (if AIMP did not do it itself) and the still image fades out.
 //   5. On start-up the plugin continues the track at the same position.
 #pragma once
 #include <shellapi.h>
@@ -273,6 +274,37 @@ public:
     }
 };
 
+inline std::wstring ClassOf(HWND h) {
+    wchar_t cls[128] = {};
+    GetClassNameW(h, cls, 128);
+    return cls;
+}
+
+// Window classes of the process's maximized windows (AIMP's main form when it is maximized)
+inline std::vector<std::wstring> MaximizedWindows(DWORD pid) {
+    std::vector<std::wstring> r;
+    for (HWND h : StillImage::VisibleWindows(pid))
+        if (IsZoomed(h)) r.push_back(ClassOf(h));
+    return r;
+}
+
+// Maximizes the new process's windows of these classes again if AIMP brought them back in normal
+// size. Waits up to 2 s for each window to appear.
+inline void RestoreMaximized(DWORD pid, const std::vector<std::wstring>& classes) {
+    for (const auto& cls : classes) {
+        HWND found = nullptr;
+        for (int i = 0; i < 50 && !found; i++) {
+            for (HWND h : StillImage::VisibleWindows(pid))
+                if (ClassOf(h) == cls) { found = h; break; }
+            if (!found) WaitPumping(nullptr, 40);
+        }
+        if (found && !IsZoomed(found)) {
+            ShowWindow(found, SW_MAXIMIZE);
+            Log(L"Restart helper: " + cls + L" maximized again");
+        }
+    }
+}
+
 inline void EnableDpiAwareness() {
     // The picture must be taken in physical pixels, otherwise it is misplaced on scaled displays
     typedef BOOL(WINAPI * SetCtx)(HANDLE);
@@ -313,6 +345,8 @@ inline void RunRestartHelper(const wchar_t* cmdLine) {
     std::wstring hz = argv[1], ini = argv[2], keyPath = argv[3], exe = argv[4];
     bool seamless = argc >= 6 && std::wstring(argv[5]) == L"seamless";
     LocalFree(argv);
+    // The value goes into AIMP.ini as it is: only a plain number is accepted
+    if (hz.empty() || hz.size() > 7 || hz.find_first_not_of(L"0123456789") != std::wstring::npos) return;
 
     size_t slash = ini.find_last_of(L"\\/");
     if (slash != std::wstring::npos) Logger::Get().SetFile(ini.substr(0, slash + 1) + L"PreventResampling.log");
@@ -323,6 +357,7 @@ inline void RunRestartHelper(const wchar_t* cmdLine) {
         int n = still.Show(pid);
         Log(L"Restart helper: still image of " + std::to_wstring(n) + L" AIMP window(s)");
     }
+    std::vector<std::wstring> maximized = pid ? MaximizedWindows(pid) : std::vector<std::wstring>();
     HANDLE ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, ReadyEventName(pid).c_str());
     if (ready) { SetEvent(ready); CloseHandle(ready); }
 
@@ -360,7 +395,7 @@ inline void RunRestartHelper(const wchar_t* cmdLine) {
     }
     CloseHandle(pi.hThread);
     Log(L"Restart helper: starting AIMP");
-    if (!still.Empty()) {
+    if (!still.Empty() || !maximized.empty()) {
         // Keep the still image until the new AIMP window is on screen, then fade it out
         DWORD start = GetTickCount();
         bool visible = false;
@@ -369,7 +404,10 @@ inline void RunRestartHelper(const wchar_t* cmdLine) {
             if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) break;
             WaitPumping(nullptr, 40);
         }
-        if (visible) WaitPumping(nullptr, 250);  // let the new window paint
+        if (visible) {
+            RestoreMaximized(pi.dwProcessId, maximized);
+            WaitPumping(nullptr, 250);  // let the new window paint
+        }
         still.Remove(180);
         Log(visible ? L"Restart helper: AIMP is back after " + std::to_wstring(GetTickCount() - start) + L" ms"
                     : std::wstring(L"Restart helper: no AIMP window appeared, still image removed"));

@@ -486,6 +486,15 @@ static void CheckLayout(const std::string& out) {
                 g_failures++;
             }
         }
+        // combo box entries fit next to the drop-down button (device names come from the PC: not checked)
+        if (kind == "Combo")
+            for (auto& item : *i.items) {
+                std::string t = N(item);
+                if (!t.empty() && (t[0] == '(' || t.compare(0, 9, "Automatic") == 0) && t.size() * 6.0 > w - 24) {
+                    printf("layout: combo entry does not fit: %s: '%s' (%d px wide)\n", sheets[i.parent].c_str(), t.c_str(), w);
+                    g_failures++;
+                }
+            }
         // overlaps with other visible controls on the same tab
         for (auto& o : all) {
             if (o.self == i.self || o.parent != i.parent || &o < &i) continue;
@@ -680,6 +689,10 @@ int main(int argc, char** argv) {
         std::string after = ReadFile(dir + "/test8.ini");
         CHECK(after.find("DeviceFreq=44100\r\n") != std::string::npos);
         CHECK(after.find("DeviceBitDepth=3") != std::string::npos && after.compare(0, 3, "\xEF\xBB\xBF") == 0);
+        // Anything but a plain number is not written into AIMP.ini
+        args = L"0 \"44100\r\n[X]\" \"" + T(dir) + L"/test8.ini\" \"AIMPSoundOut\\DeviceFreq\" -";
+        restartProc(nullptr, nullptr, &args[0], 0);
+        CHECK(ReadFile(dir + "/test8.ini") == after);
     }
 
     // AIMP outputs at a fixed 48 kHz (AIMP.ini in UTF-16), WASAPI exclusive, track at 96 kHz.
@@ -808,11 +821,12 @@ int main(int argc, char** argv) {
     }
     // ... and an update is found on start-up: downloaded, SHA-256 checked, opened in AIMP
     const std::string pkg = "PK-fake-aimppack-content";
+    const std::string pkgUrl = "https://github.com/RainBowFl4sh/AIMP-No-Resmapling/releases/download/v9.9.9/PreventResampling-9.9.9.aimppack";
     core->http->pages["https://api.github.com/repos/RainBowFl4sh/AIMP-No-Resmapling/releases/latest"] =
         "{\"tag_name\": \"v9.9.9\", \"body\": \"Fixes \\u00e4\\r\\n- one\", \"assets\": [{\"name\": "
-        "\"PreventResampling-9.9.9.aimppack\", \"browser_download_url\": \"https://example.invalid/pkg\", "
+        "\"PreventResampling-9.9.9.aimppack\", \"browser_download_url\": \"" + pkgUrl + "\", "
         "\"digest\": \"sha256:" + ar::Sha256::Of(pkg) + "\"}]}";
-    core->http->pages["https://example.invalid/pkg"] = pkg;
+    core->http->pages[pkgUrl] = pkg;
     IniSet("UpdateInterval", "0");
     IniSet("UpdateAutoInstall", "1");
     int playsBefore = core->player->plays;
@@ -889,6 +903,27 @@ int main(int argc, char** argv) {
         plugin->Release();
     }
     CHECK(ReadFile(dir + "/PreventResampling.log").find("Update: Update check failed") != std::string::npos);
+
+    // A release whose package is not in this repository's releases, or whose name is not a plain file
+    // name, is shown but never downloaded
+    core->http->pages["https://api.github.com/repos/RainBowFl4sh/AIMP-No-Resmapling/releases/latest"] =
+        "{\"tag_name\": \"v9.9.10\", \"body\": \"\", \"assets\": ["
+        "{\"name\": \"PreventResampling-9.9.10.aimppack\", \"browser_download_url\": \"https://example.invalid/pkg\", \"digest\": \"sha256:" + ar::Sha256::Of(pkg) + "\"},"
+        "{\"name\": \"..\\\\x.aimppack\", \"browser_download_url\": \"https://github.com/RainBowFl4sh/AIMP-No-Resmapling/releases/download/v9.9.10/x.aimppack\", \"digest\": \"sha256:" + ar::Sha256::Of(pkg) + "\"}]}";
+    IniSet("UpdateInterval", "0");
+    {
+        size_t requests = core->http->requested.size();
+        plugin = nullptr;
+        getHeader(&plugin);
+        CHECK(Succeeded(plugin->Initialize(core)));
+        core->disp->hook->CoreMessage(AIMP_MSG_EVENT_LOADED, 0, nullptr, nullptr);
+        CHECK(WaitUntil([&] { return IniGet("Updates", "LatestVersion") == "9.9.10"; }));
+        WaitUntil([] { return false; }, 300);
+        CHECK(core->http->requested.size() == requests + 1);  // only the release information
+        CHECK(IniGet("Updates", "AutoOpened") == "9.9.9");
+        CHECK(Succeeded(plugin->Finalize()));
+        plugin->Release();
+    }
 
     g_ui.reg.Clear();
     dlclose(lib);

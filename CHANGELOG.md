@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.5.5
+
+Security:
+- Updates: the package and its checksum are only downloaded from this repository's GitHub releases, and the package name is only accepted as a plain file name (letters, digits, ".", "-", "_"). A manipulated release answer can no longer make the plugin download from another server or save a file outside the settings folder
+- The restart helper (RestartAimp, started through rundll32) only writes a plain number as AIMP's output rate into AIMP.ini
+- Device formats are checked before they are handed to Windows: a damaged [Session] entry in the settings file, or an implausible format reported by a driver, is ignored instead of being passed on
+- Release tags with extremely long numbers no longer overflow in the version comparison
+
+Improved:
+- Switching on Windows: the current format of each device is read once per track instead of several times (each read opened the Windows device list again)
+- Settings file and AIMP.ini: case-insensitive comparisons without temporary strings; simpler key detection in AIMP.ini
+
+Fixed:
+- Voicemeeter started after AIMP was only noticed after restarting AIMP ("installed, not running"). The Remote API session does not see a Voicemeeter that starts later, so the plugin now logs in again while Voicemeeter is not reachable (at most every 3 seconds). If the current track goes to Voicemeeter, the plugin waits for it and switches as soon as Voicemeeter runs - no new track and no AIMP restart needed
+- ASIO / WASAPI exclusive / DirectSound with the restart option: a maximized AIMP window came back in normal size after the restart. The restart helper now remembers which AIMP windows were maximized and maximizes them again if AIMP does not do it itself, before the still image fades out
+- Output tab: the first entry of "Windows device" was cut off ("(automatic: from AIMP's output, otherwise the W..."). It now reads "Automatic (from AIMP's output)" like the other automatic entries; the note below the list explains the fallback to the Windows default device. The layout test now also checks that such entries fit
+- A log file larger than 4 GB was not started anew (only the lower 32 bits of the size were checked)
+- AIMP.ini: the UTF-8 byte order mark is now recognised by all three bytes, not only by the first one
+
 ## 2.5.4
 
 New:

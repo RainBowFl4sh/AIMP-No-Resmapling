@@ -53,7 +53,7 @@ inline std::vector<IniRateKey> FindAimpRateKeys(const tstring& profileDir) {
 #endif
         }
     } else {
-        size_t start = (raw.size() >= 3 && (unsigned char)raw[0] == 0xEF) ? 3 : 0;
+        size_t start = raw.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
 #ifdef _WIN32
         int len = MultiByteToWideChar(CP_UTF8, 0, raw.data() + start, (int)(raw.size() - start), nullptr, 0);
         text.resize(len);
@@ -79,14 +79,13 @@ inline std::vector<IniRateKey> FindAimpRateKeys(const tstring& profileDir) {
             v = v * 10 + (c - AR_T('0'));
         }
         if (!digits || !IsAudioRate(v)) continue;
-        tstring where = Lower(section + AR_T("\\") + key);
+        tstring where = section + AR_T("\\") + key;
         bool outputish = ContainsI(where, AR_T("output")) || ContainsI(where, AR_T("sound")) ||
                          ContainsI(where, AR_T("playback")) || ContainsI(where, AR_T("player"));
-        bool rateish = ContainsI(key, AR_T("freq")) || ContainsI(key, AR_T("rate")) || ContainsI(key, AR_T("samplerate")) ||
-                       ContainsI(key, AR_T("hz"));
+        bool rateish = ContainsI(key, AR_T("freq")) || ContainsI(key, AR_T("rate")) || ContainsI(key, AR_T("hz"));
         if (!outputish || !rateish) continue;
         IniRateKey k{section + AR_T("\\") + key, v};
-        if (Lower(k.path) == AR_T("aimpsoundout\\devicefreq")) r.insert(r.begin(), k);
+        if (EqualsI(k.path, AR_T("AIMPSoundOut\\DeviceFreq"))) r.insert(r.begin(), k);
         else r.push_back(k);
     }
     return r;
@@ -134,10 +133,12 @@ public:
         Ptr<IAIMPPropertyList> pl;
         if (player && Succeeded(player->QueryInterface(IID_IAIMPPropertyList, pl.OutV())) && pl) {
             Ptr<IAIMPString> s;
-            if (Succeeded(pl->GetValueAsObject(AIMP_PLAYER_PROPID_OUTPUT, IID_IAIMPString, s.OutV())) && s)
+            if (Succeeded(pl->GetValueAsObject(AIMP_PLAYER_PROPID_OUTPUT, IID_IAIMPString, s.OutV())) && s) {
                 Log(AR_T("AIMP output at start-up: ") + FromString(s.Get()));
-            else if (!ConfiguredAimpOutput().empty())
-                Log(AR_T("AIMP output (from AIMP's settings): ") + ConfiguredAimpOutput());
+            } else {
+                tstring configured = ConfiguredAimpOutput();
+                if (!configured.empty()) Log(AR_T("AIMP output (from AIMP's settings): ") + configured);
+            }
         }
         auto keys = FindAimpRateKeys(profileDir);
         if (keys.empty()) Log(AR_T("AIMP.ini: no output sample rate found (") + profileDir + AR_T("AIMP.ini)"));

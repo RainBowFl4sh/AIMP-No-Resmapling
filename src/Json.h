@@ -1,5 +1,6 @@
 // Minimal JSON reader for the GitHub release API (objects, arrays, strings, numbers, literals).
 #pragma once
+#include <cstring>
 #include <map>
 #include <memory>
 #include <string>
@@ -129,7 +130,8 @@ private:
         }
         if (c == '"') { v.type = String; return ParseStr(s, p, v.str); }
         size_t start = p;
-        while (p < s.size() && std::string(",}] \t\r\n").find(s[p]) == std::string::npos) p++;
+        static const char stop[] = ",}] \t\r\n";
+        while (p < s.size() && !memchr(stop, s[p], sizeof(stop) - 1)) p++;
         v.str = s.substr(start, p - start);
         if (v.str == "null") { v.type = Null; return true; }
         if (v.str == "true" || v.str == "false") { v.type = Bool; return true; }
