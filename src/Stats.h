@@ -3,6 +3,7 @@
 #include <map>
 
 #include "Common.h"
+#include "Lang.h"
 
 namespace ar {
 
@@ -59,58 +60,69 @@ private:
     }
 
 public:
+    // Text of the Advanced tab in the current language; the label column fits the longest label
     tstring Format(bool enabled) const {
-        tstring t;
-        auto line = [&](const tstring& s) { t += s + AR_NL; };
-        auto pad = [](tstring s, size_t w) { while (s.size() < w) s += AR_T(' '); return s; };
-        auto row = [&](const TChar* label, const tstring& value) { line(AR_T("  ") + pad(label, 18) + value); };
-        line(AR_T(AR_PLUGIN_NAME " " AR_VERSION "  ·  by " AR_AUTHOR));
-        if (!enabled) line(AR_T("The plugin is DISABLED (General tab)."));
+        std::vector<std::pair<tstring, tstring>> rows;  // label (empty = heading or plain line), value
+        auto line = [&](const tstring& s) { rows.push_back({tstring(), s}); };
+        auto row = [&](const char* label, const tstring& value) { rows.push_back({Tr(label), value}); };
+        line(AR_T(AR_PLUGIN_NAME " " AR_VERSION "  \u00B7  ") + Trf("by %1", {AR_T(AR_AUTHOR)}));
+        if (!enabled) line(Tr("The plugin is DISABLED (General tab)."));
         line(tstring());
 
-        line(AR_T("NOW PLAYING"));
-        row(AR_T("AIMP output:"), aimpOutput.empty() ? tstring(AR_T("-")) : aimpOutput);
-        row(AR_T("Mode:"), modeText.empty() ? tstring(AR_T("-")) : modeText);
+        line(Tr("NOW PLAYING"));
+        row("AIMP output:", aimpOutput.empty() ? tstring(AR_T("-")) : aimpOutput);
+        row("Mode:", modeText.empty() ? tstring(AR_T("-")) : modeText);
         if (trackRate) {
             tstring tr = Khz(trackRate);
             if (trackBits) tr += AR_T(" / ") + Num(trackBits) + AR_T(" bit");
-            if (trackChannels) tr += AR_T(" / ") + Num(trackChannels) + AR_T(" ch");
+            if (trackChannels) tr += AR_T(" / ") + Trf("%1 ch", {Num(trackChannels)});
             if (!trackCodec.empty()) tr += AR_T(" (") + trackCodec + AR_T(")");
-            row(AR_T("Track:"), tr);
+            row("Track:", tr);
         }
         if (aimpRate)
-            row(AR_T("AIMP rate:"), Khz(aimpRate) + (trackRate && aimpRate != trackRate ? tstring(AR_T("  (AIMP resamples)")) : tstring()));
+            row("AIMP rate:", Khz(aimpRate) + (trackRate && aimpRate != trackRate ? AR_T("  (") + Tr("AIMP resamples") + AR_T(")") : tstring()));
         bool aimpOk = !aimpRate || aimpRate == deviceRate;
-        row(AR_T("Output rate:"),
+        row("Output rate:",
             (deviceRate ? Khz(deviceRate) : tstring(AR_T("-"))) +
                 (deviceRate && trackRate && aimpOk
-                     ? (deviceRate == trackRate ? tstring(AR_T("  (bit-perfect, no resampling)"))
-                                                : tstring(AR_T("  (integer multiple)")))
+                     ? AR_T("  (") + Tr(deviceRate == trackRate ? "bit-perfect, no resampling" : "integer multiple") + AR_T(")")
                      : tstring()));
-        if (!chainText.empty()) row(AR_T("Devices:"), chainText);
-        if (!vmText.empty()) row(AR_T("Voicemeeter:"), vmText);
-        if (!note.empty()) row(AR_T("Note:"), note);
-        if (!hardwareText.empty()) row(AR_T("Timing:"), hardwareText);
+        if (!chainText.empty()) row("Devices:", chainText);
+        if (!vmText.empty()) row("Voicemeeter:", vmText);
+        if (!note.empty()) row("Note:", note);
+        if (!hardwareText.empty()) row("Timing:", hardwareText);
         line(tstring());
 
-        line(AR_T("COUNTERS"));
-        row(AR_T("Tracks analysed:"), Num(tracks));
-        row(AR_T("Switches:"), Num(switches));
-        row(AR_T("Already matching:"), Num(skipped));
-        row(AR_T("Failed:"), Num(failures));
-        row(AR_T("Voicemeeter restarts:"), Num(vmRestarts));
-        row(AR_T("AIMP restarts:"), Num(aimpRestarts));
+        line(Tr("COUNTERS"));
+        row("Tracks analysed:", Num(tracks));
+        row("Switches:", Num(switches));
+        row("Already matching:", Num(skipped));
+        row("Failed:", Num(failures));
+        row("Voicemeeter restarts:", Num(vmRestarts));
+        row("AIMP restarts:", Num(aimpRestarts));
         if (switches)
-            row(AR_T("Switch time:"), Num(lastSwitchMs) + AR_T(" ms (last), ") + Num(switchMsTotal / switches) + AR_T(" ms (average)"));
+            row("Switch time:", Trf("%1 ms (last), %2 ms (average)", {Num(lastSwitchMs), Num(switchMsTotal / switches)}));
 
         if (!rates.empty()) {
             line(tstring());
-            line(AR_T("TRACK SAMPLE RATES"));
+            line(Tr("TRACK SAMPLE RATES"));
             long total = 0;
             for (auto& r : rates) total += r.second;
-            for (auto& r : rates)
-                line(AR_T("  ") + pad(Khz(r.first), 12) + Num(r.second) + AR_T("  (") + Num(total ? r.second * 100 / total : 0) +
-                     AR_T(" %)"));
+            for (auto& r : rates) {
+                tstring k = Khz(r.first);
+                while (TextLength(k) < 12) k += AR_T(' ');
+                line(AR_T("  ") + k + Num(r.second) + AR_T("  (") + Num(total ? r.second * 100 / total : 0) + AR_T(" %)"));
+            }
+        }
+
+        size_t width = 18;
+        for (auto& r : rows) width = (std::max)(width, TextLength(r.first) + 2);
+        tstring t;
+        for (auto& r : rows) {
+            if (r.first.empty()) { t += r.second + AR_NL; continue; }
+            tstring label = r.first;
+            while (TextLength(label) < width) label += AR_T(' ');
+            t += AR_T("  ") + label + r.second + AR_NL;
         }
         return t;
     }

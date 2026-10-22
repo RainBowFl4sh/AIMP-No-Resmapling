@@ -28,6 +28,7 @@
 #include "apiPlayer.h"
 #include "apiPlugin.h"
 #include "apiInternet.h"
+#include "apiMUI.h"
 #include "apiThreading.h"
 #include "../src/Sha256.h"
 #include "mock_ui.h"
@@ -43,6 +44,24 @@ static tstr T(const std::string& a) { return tstr(a.begin(), a.end()); }  // ASC
 static std::string N(const tstr& w) {
     std::string r;
     for (TChar c : w) r += (c > 0 && c < 128) ? (char)c : '?';
+    return r;
+}
+// Characters of a text (Linux: UTF-8, continuation bytes do not count)
+static size_t Len(const tstr& w) {
+    size_t n = 0;
+    for (TChar c : w)
+        if (sizeof(TChar) > 1 || (((unsigned char)c) & 0xC0) != 0x80) n++;
+    return n;
+}
+// UTF-8 of a text (for comparisons with non-ASCII texts)
+static std::string U8(const tstr& w) {
+    std::string r;
+    for (size_t i = 0; i < w.size(); i++) {
+        unsigned long c = (unsigned long)(sizeof(TChar) > 1 ? (unsigned long)w[i] : (unsigned char)w[i]);
+        if (sizeof(TChar) == 1 || c < 0x80) { r += (char)c; continue; }
+        if (c < 0x800) { r += (char)(0xC0 | (c >> 6)); r += (char)(0x80 | (c & 0x3F)); continue; }
+        r += (char)(0xE0 | (c >> 12)); r += (char)(0x80 | ((c >> 6) & 0x3F)); r += (char)(0x80 | (c & 0x3F));
+    }
     return r;
 }
 
@@ -324,6 +343,19 @@ struct ShutdownSvc : Obj<IAIMPServiceShutdown> {
     HRESULT Shutdown(DWORD) override { calls++; return S_OK; }
 };
 
+// AIMP's language (IAIMPServiceMUI): name and LangId of the language file
+static std::string g_muiName = "English (USA)", g_muiLangId = "1033";
+struct Mui : Obj<IAIMPServiceMUI> {
+    Mui() { iids = {&IID_IAIMPServiceMUI}; }
+    HRESULT GetName(IAIMPString** v) override { *v = MkStr(g_muiName); return S_OK; }
+    HRESULT GetValue(IAIMPString* key, IAIMPString** v) override {
+        if (!key || N(tstr(key->GetData(), key->GetLength())) != "FILE\\LangId") return E_FAIL;
+        *v = MkStr(g_muiLangId);
+        return S_OK;
+    }
+    HRESULT GetValuePart(IAIMPString*, INT32, IAIMPString**) override { return E_FAIL; }
+};
+
 struct CoreImpl : Obj<IAIMPCore> {
     Player* player = new Player();
     Threads* threads = new Threads();
@@ -331,6 +363,7 @@ struct CoreImpl : Obj<IAIMPCore> {
     ConfigSvc* config = new ConfigSvc();
     ShutdownSvc* shutdown = new ShutdownSvc();
     HttpSvc* http = new HttpSvc();
+    Mui* mui = new Mui();
     std::string profile;
     IUnknown* frame = nullptr;
     CoreImpl() { iids = {&IID_IAIMPCore}; }
@@ -342,6 +375,7 @@ struct CoreImpl : Obj<IAIMPCore> {
         else if (EqualGUID(riid, IID_IAIMPServiceConfig)) s = config;
         else if (EqualGUID(riid, IID_IAIMPServiceShutdown)) s = shutdown;
         else if (EqualGUID(riid, IID_IAIMPServiceHTTPClient)) s = http;
+        else if (EqualGUID(riid, IID_IAIMPServiceMUI)) s = mui;
         else if (EqualGUID(riid, IID_IAIMPServiceUI)) s = static_cast<IAIMPServiceUI*>(&g_ui);
         else if (EqualGUID(riid, IID_IAIMPServiceOptionsDialog)) s = static_cast<IAIMPServiceOptionsDialog*>(&g_options);
         if (s) { s->AddRef(); *p = s; return S_OK; }
@@ -443,7 +477,7 @@ static void CheckLayout(const std::string& out) {
     for (auto& i : all)
         if (i.kind == mockui::Service::K("S")) {
             auto c = i.strs->find(AIMPUI_TABSHEET_PROPID_CAPTION);
-            sheets[i.self] = c == i.strs->end() ? "?" : N(c->second);
+            sheets[i.self] = c == i.strs->end() ? "?" : U8(c->second);
             order.push_back(i.self);
         }
     CHECK(order.size() >= 3);
@@ -455,13 +489,16 @@ static void CheckLayout(const std::string& out) {
         controls++;
         const RECT& b = i.bounds;
         std::string kind = N(i.kind), text;
+        tstr raw;
         for (int prop : {AIMPUI_LABEL_PROPID_TEXT, AIMPUI_CHECKBOX_PROPID_CAPTION, AIMPUI_BUTTON_PROPID_CAPTION})
-            if (i.strs->count(prop)) text = N(i.strs->at(prop));
-        if (kind == "Check") text = N(i.strs->count(AIMPUI_CHECKBOX_PROPID_CAPTION) ? i.strs->at(AIMPUI_CHECKBOX_PROPID_CAPTION) : tstr());
-        if (kind == "Button") text = N(i.strs->count(AIMPUI_BUTTON_PROPID_CAPTION) ? i.strs->at(AIMPUI_BUTTON_PROPID_CAPTION) : tstr());
+            if (i.strs->count(prop)) raw = i.strs->at(prop);
+        if (kind == "Check") raw = i.strs->count(AIMPUI_CHECKBOX_PROPID_CAPTION) ? i.strs->at(AIMPUI_CHECKBOX_PROPID_CAPTION) : tstr();
+        if (kind == "Button") raw = i.strs->count(AIMPUI_BUTTON_PROPID_CAPTION) ? i.strs->at(AIMPUI_BUTTON_PROPID_CAPTION) : tstr();
+        text = U8(raw);
+        size_t len = Len(raw);
         bool bold = i.ints->count(AIMPUI_LABEL_PROPID_TEXTSTYLE) && kind == "Label";
         bool hidden = i.ints->count(AIMPUI_CONTROL_PROPID_VISIBLE) && i.ints->at(AIMPUI_CONTROL_PROPID_VISIBLE) == 0;
-        std::string where = sheets[i.parent] + ": " + kind + " '" + text.substr(0, 40) + "'";
+        std::string where = sheets[i.parent] + ": " + kind + " '" + text.substr(0, 60) + "'";
         int w = b.right - b.left, h = b.bottom - b.top;
         if (!(i.placed && i.alignment == 0 && i.anchors.left == 1 && i.anchors.top == 1)) {
             printf("layout: not anchored: %s\n", where.c_str());
@@ -479,8 +516,8 @@ static void CheckLayout(const std::string& out) {
             if (size) cw = cw * size / 9.0;
             double avail = w - (kind == "Check" ? 20 : kind == "Button" ? 12 : 0);
             bool wrap = i.ints->count(AIMPUI_LABEL_PROPID_WORDWRAP) && i.ints->at(AIMPUI_LABEL_PROPID_WORDWRAP);
-            int lines = wrap ? (int)(text.size() * cw / (avail * 0.92)) + 1 : 1;
-            bool fits = wrap ? lines * 16 <= h + 2 : text.size() * cw <= avail;
+            int lines = wrap ? (int)(len * cw / (avail * 0.92)) + 1 : 1;
+            bool fits = wrap ? lines * 16 <= h + 2 : len * cw <= avail;
             if (!fits) {
                 printf("layout: text does not fit: %s (%d px wide, %d high)\n", where.c_str(), w, h);
                 g_failures++;
@@ -489,8 +526,9 @@ static void CheckLayout(const std::string& out) {
         // combo box entries fit next to the drop-down button (device names come from the PC: not checked)
         if (kind == "Combo")
             for (auto& item : *i.items) {
-                std::string t = N(item);
-                if (!t.empty() && (t[0] == '(' || t.compare(0, 9, "Automatic") == 0) && t.size() * 6.0 > w - 24) {
+                std::string t = U8(item);
+                bool own = &item == &i.items->front() || (!t.empty() && t[0] == '(');  // not a device name
+                if (own && Len(item) * 6.0 > w - 24) {
                     printf("layout: combo entry does not fit: %s: '%s' (%d px wide)\n", sheets[i.parent].c_str(), t.c_str(), w);
                     g_failures++;
                 }
@@ -522,6 +560,121 @@ static void CheckLayout(const std::string& out) {
     }
     if (f) fclose(f);
     CHECK(controls > 25);
+}
+
+// Control of the settings page by kind and visible text (caption, label text or a combo box item)
+static mockui::Registry::Info FindControl(const std::string& kind, const std::string& text) {
+    for (auto& f : g_ui.reg.all) {
+        auto i = f();
+        if (N(i.kind) != kind) continue;
+        for (auto& kv : *i.strs)
+            if (U8(kv.second) == text) return i;
+        for (auto& item : *i.items)
+            if (U8(item) == text) return i;
+    }
+    mockui::Registry::Info none{};
+    none.self = nullptr;
+    return none;
+}
+static std::string TabCaption(int index) {
+    int n = 0;
+    for (auto& f : g_ui.reg.all) {
+        auto i = f();
+        if (i.kind != mockui::Service::K("S")) continue;
+        if (n++ == index) return i.strs->count(AIMPUI_TABSHEET_PROPID_CAPTION) ? U8(i.strs->at(AIMPUI_TABSHEET_PROPID_CAPTION)) : "";
+    }
+    return "";
+}
+static void WriteFile(const std::string& p, const std::string& data) {
+    FILE* f = fopen(p.c_str(), "wb");
+    if (!f) return;
+    fwrite(data.data(), 1, data.size(), f);
+    fclose(f);
+}
+
+// Advanced tab: language list (switches the page at once, every language fits the layout and has all
+// texts translated), automatic language from AIMP, export and import of the settings file
+static void LanguageAndSettingsFile(const std::string& dir) {
+#ifdef _WIN32
+    const int advanced = 4;  // General, Output, ASIO / Exclusive, Voicemeeter, Advanced, About
+#else
+    const int advanced = 3;
+#endif
+    CHECK(TabCaption(advanced) == "Advanced");
+    auto lang = FindControl("Combo", "Deutsch");
+    CHECK(lang.self != nullptr);
+    if (!lang.self) return;
+    CHECK(U8(lang.items->front()) == "Automatic (AIMP: English)" && lang.items->size() == 5);
+    auto pick = [&](int index) {
+        (*lang.ints)[AIMPUI_COMBOBOX_PROPID_ITEMINDEX] = index;
+        lang.fire();
+    };
+    const char* codes[] = {"auto", "en", "de", "ru", "uk"};
+    const char* captions[] = {"", "Advanced", "Erweitert", "\xD0\xA0\xD0\xB0\xD1\x81\xD1\x88\xD0\xB8\xD1\x80\xD0\xB5\xD0\xBD\xD0\xBD\xD1\x8B\xD0\xB5",
+                              "\xD0\xA0\xD0\xBE\xD0\xB7\xD1\x88\xD0\xB8\xD1\x80\xD0\xB5\xD0\xBD\xD1\x96"};
+    for (int l = 2; l <= 4; l++) {
+        pick(l);
+        printf("layout in language %s:\n", codes[l]);
+        CHECK(TabCaption(advanced) == captions[l]);
+        CheckLayout(dir + "/layout-" + codes[l] + ".txt");
+    }
+    // Automatic: follows AIMP's language file (LangId 1031 = German)
+    g_muiName = "Deutsch (D / A / CH)";
+    g_muiLangId = "1031";
+    pick(0);
+    CHECK(TabCaption(advanced) == "Erweitert");
+    CHECK(U8(lang.items->front()) == "Automatisch (AIMP: Deutsch)");
+    g_muiName = "English (USA)";
+    g_muiLangId = "1033";
+    pick(1);
+    pick(0);
+    CHECK(TabCaption(advanced) == "Advanced");
+    CHECK(ReadFile(dir + "/PreventResampling.log").find("Missing translation") == std::string::npos);
+
+    // Export: the settings shown on the page; ".ini" is added to a name without extension
+    auto exportButton = FindControl("Button", "Export...");
+    auto importButton = FindControl("Button", "Import...");
+    CHECK(exportButton.self && importButton.self);
+    if (!exportButton.self || !importButton.self) return;
+    int shown = g_ui.message.shown;
+    g_ui.dialogs.pick = T(dir + "/exported");
+    remove((dir + "/exported.ini").c_str());
+    exportButton.fire();
+    std::string exported = ReadFile(dir + "/exported.ini");
+    CHECK(exported.find("[PreventResampling]") != std::string::npos && exported.find("Language=auto") != std::string::npos &&
+          exported.find("AllowMultiples=1") != std::string::npos && exported.find("[Statistics]") == std::string::npos);
+    CHECK(g_ui.message.shown == shown + 1 && N(g_ui.message.text).find("exported") != std::string::npos);
+    // AIMP's save dialog adds the extension a second time: "name.ini.ini" is saved as "name.ini"
+    g_ui.dialogs.pick = T(dir + "/exported.ini.ini");
+    remove((dir + "/exported.ini").c_str());
+    exportButton.fire();
+    CHECK(ReadFile(dir + "/exported.ini").find("[PreventResampling]") != std::string::npos);
+    shown = g_ui.message.shown - 1;
+    // Cancelled dialog: nothing happens
+    g_ui.dialogs.pick.clear();
+    exportButton.fire();
+    importButton.fire();
+    CHECK(g_ui.message.shown == shown + 1);
+    // Import: shown and saved at once, the language switches
+    WriteFile(dir + "/import.ini", "[PreventResampling]\r\nLanguage=ru\r\nAllowMultiples=0\r\n");
+    g_ui.dialogs.pick = T(dir + "/import.ini");
+    importButton.fire();
+    CHECK(IniGet("PreventResampling", "Language") == "ru" && IniGet("PreventResampling", "AllowMultiples") == "0");
+    CHECK(TabCaption(advanced) == captions[3]);
+    CHECK(g_ui.message.shown == shown + 2);
+    // A file without the plugin's settings is refused
+    WriteFile(dir + "/other.ini", "[Something]\r\nLanguage=de\r\n");
+    g_ui.dialogs.pick = T(dir + "/other.ini");
+    importButton.fire();
+    CHECK(IniGet("PreventResampling", "Language") == "ru" && g_ui.message.shown == shown + 3);
+    // Back to the exported settings
+    g_ui.dialogs.pick = T(dir + "/exported.ini");
+    importButton.fire();
+    CHECK(IniGet("PreventResampling", "Language") == "auto" && IniGet("PreventResampling", "AllowMultiples") == "1");
+    CHECK(TabCaption(advanced) == "Advanced");
+    g_ui.dialogs.pick.clear();
+    g_ui.message.shown = 0;
+    CHECK(ReadFile(dir + "/PreventResampling.log").find("Missing translation") == std::string::npos);
 }
 
 static void StartTrack(CoreImpl* core, int rate) {
@@ -609,6 +762,7 @@ int main(int argc, char** argv) {
             if (longest > 76) printf("changelog: longest line %d characters\n", (int)longest);
             CHECK(longest <= 76);
         }
+        LanguageAndSettingsFile(dir);
         frame->DestroyFrame();
         frame->Release();
     }
@@ -620,6 +774,7 @@ int main(int argc, char** argv) {
     plugin->Release();
     CHECK(IniGet("Statistics", "Tracks") == "0");
     CHECK(IniGet("PreventResampling", "Enabled") == "0");  // defaults written, plugin off
+    CHECK(!IniGet("Updates", "RunVersion").empty() && g_ui.message.shown == 0);  // new installation: no update notice
     CHECK(IniGet("PreventResampling", "RestartAimp") == "0");
     // settings of older versions in AIMP's configuration are removed on the first start
     CHECK(core->config->deleted.size() == 2 && core->config->deleted[0] == "PreventResampling");
@@ -726,6 +881,16 @@ int main(int argc, char** argv) {
     CHECK(WaitUntil([&] { return core->shutdown->calls == 1; }));
     CHECK(core->player->stops == stops0 + 1 && core->player->plays == plays0);
     CHECK(ReadFile(dir + "/PreventResampling.resume").find("96000") != std::string::npos);
+    {
+        // 5th line: AIMP's windows for the restarted AIMP ("<active>,<foreground>,<tick>|...")
+        std::string r = ReadFile(dir + "/PreventResampling.resume");
+        size_t pos = 0;
+        for (int i = 0; i < 4 && pos < r.size(); i++) {
+            size_t nl = r.find('\n', pos);
+            pos = nl == std::string::npos ? r.size() : nl + 1;
+        }
+        CHECK(pos + 1 < r.size() && (r[pos] == '0' || r[pos] == '1') && r[pos + 1] == ',');
+    }
     CHECK(Succeeded(plugin->Finalize()));
     plugin->Release();
     // Closed by the plugin: the rates stay, the originals are handed to the next AIMP process
@@ -881,6 +1046,22 @@ int main(int argc, char** argv) {
     CHECK(IniGet("Statistics", "Tracks") == "12");
     plugin->Release();
 
+    // Start after an update (the last start was an older version): the user is told once, after loading
+    IniSetIn("Updates", "RunVersion", "2.5.5");
+    plugin = nullptr;
+    getHeader(&plugin);
+    CHECK(Succeeded(plugin->Initialize(core)));
+    CHECK(g_ui.message.shown == 0);  // not before AIMP has loaded
+    core->disp->hook->CoreMessage(AIMP_MSG_EVENT_LOADED, 0, nullptr, nullptr);
+    CHECK(WaitUntil([] { return g_ui.message.shown == 1; }));
+    CHECK(N(g_ui.message.caption) == "Prevent Resampling");
+    CHECK(N(g_ui.message.text).find("was updated to version") != std::string::npos &&
+          N(g_ui.message.text).find("About") != std::string::npos);
+    CHECK(IniGet("Updates", "RunVersion") != "2.5.5");
+    CHECK(ReadFile(dir + "/PreventResampling.log").find("Updated from 2.5.5 to") != std::string::npos);
+    CHECK(Succeeded(plugin->Finalize()));
+    plugin->Release();
+
     // Further runs: a failed update check (GitHub not reachable) is marked as failed (not shown as
     // "latest version") and repeated at the next start after an hour, although the weekly interval
     // has not passed - not at a start right after it (e.g. a restart by the plugin)
@@ -903,6 +1084,7 @@ int main(int argc, char** argv) {
         plugin->Release();
     }
     CHECK(ReadFile(dir + "/PreventResampling.log").find("Update: Update check failed") != std::string::npos);
+    CHECK(g_ui.message.shown == 1);  // the update notice only once per version
 
     // A release whose package is not in this repository's releases, or whose name is not a plain file
     // name, is shown but never downloaded

@@ -293,13 +293,33 @@ private:
     }
 };
 
+// Message dialog: remembers what was shown
+class MessageDialog final : public IAIMPUIMessageDialog {
+public:
+    int shown = 0;
+    TStr caption, text;
+    HRESULT __unknwncall QueryInterface(REFIID, LPVOID* ppv) override { *ppv = nullptr; return E_NOINTERFACE; }
+    DWORD __unknwncall AddRef() override { return 2; }
+    DWORD __unknwncall Release() override { return 1; }
+    HRESULT WINAPI Execute(HWND, IAIMPString* c, IAIMPString* t, DWORD) override {
+        shown++;
+        caption = StrOf(c);
+        text = StrOf(t);
+        return S_OK;
+    }
+};
+
 class Service final : public IAIMPServiceUI {
 public:
     Registry reg;
     FileDialogs dialogs;
-    HRESULT __unknwncall QueryInterface(REFIID, LPVOID* ppv) override {
+    MessageDialog message;
+    HRESULT __unknwncall QueryInterface(REFIID riid, LPVOID* ppv) override {
+        // like AIMP: the message dialog and the file dialogs are queried from the UI service
         *ppv = nullptr;
-        return E_NOINTERFACE;
+        if (memcmp(&riid, &IID_IAIMPUIMessageDialog, sizeof(GUID)) == 0) *ppv = static_cast<IAIMPUIMessageDialog*>(&message);
+        if (memcmp(&riid, &IID_IAIMPUIFileDialogs, sizeof(GUID)) == 0) *ppv = static_cast<IAIMPUIFileDialogs*>(&dialogs);
+        return *ppv ? S_OK : E_NOINTERFACE;
     }
     DWORD __unknwncall AddRef() override { return 2; }
     DWORD __unknwncall Release() override { return 1; }   // lives as long as the test

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(PreventResampling VERSION 2.5.5 LANGUAGES CXX)
+project(PreventResampling VERSION 2.6.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -79,7 +79,7 @@ set_target_properties(PreventResampling PROPERTIES
 
 if(WIN32)
   target_compile_definitions(PreventResampling PRIVATE UNICODE _UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS)
-  target_link_libraries(PreventResampling PRIVATE ole32 oleaut32 uuid advapi32 user32 gdi32 shell32)
+  target_link_libraries(PreventResampling PRIVATE ole32 oleaut32 uuid advapi32 user32 gdi32 shell32 comdlg32)
   if(MSVC)
     # Static runtime: users do not need the VC++ redistributable
     set_property(TARGET PreventResampling PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

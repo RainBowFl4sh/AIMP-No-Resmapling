@@ -14,6 +14,7 @@
 #include "AimpUtil.h"
 #include "Ini.h"
 #include "Json.h"
+#include "Lang.h"
 #include "Sha256.h"
 #include "apiInternet.h"
 #ifdef _WIN32
@@ -98,7 +99,7 @@ public:
     enum class State { Idle, Checking, UpToDate, Available, Downloading, Opened, Error };
 
     State state = State::Idle;
-    tstring message;         // status line on the About tab
+    tstring message;         // status line on the About tab, in English (see Message())
     std::string latest;      // version of the latest release ("2.5.0")
     std::string notes;       // its release notes (UTF-8)
     std::function<void()> onChanged;
@@ -115,9 +116,28 @@ private:
 
     static tstring T(const std::string& utf8) { return FromUtf8(utf8); }
 
-    void Set(State s, const tstring& msg) {
+    const char* msgKey_ = "";        // English text of the status line with %1 .. placeholders
+    std::vector<tstring> msgArgs_;
+
+    static tstring Fill(const tstring& text, const std::vector<tstring>& args) {
+        tstring out;
+        for (size_t i = 0; i < text.size(); i++) {
+            if (text[i] == AR_T('%') && i + 1 < text.size() && text[i + 1] >= AR_T('1') && text[i + 1] <= AR_T('9')) {
+                size_t n = (size_t)(text[i + 1] - AR_T('1'));
+                if (n < args.size()) out += args[n];
+                i++;
+            } else {
+                out += text[i];
+            }
+        }
+        return out;
+    }
+
+    void Set(State s, const char* key, std::vector<tstring> args = {}) {
         state = s;
-        message = msg;
+        msgKey_ = key;
+        msgArgs_ = std::move(args);
+        message = Fill(FromUtf8(key), msgArgs_);
         if (onChanged) onChanged();
     }
 
@@ -151,18 +171,24 @@ private:
         return true;
     }
 
-    void Fail(const tstring& msg0) {
-        busy_ = false;
-        // AIMP's error texts contain line breaks ("Code: 403 (...)\nMessage: Forbidden\n")
+    // AIMP's error texts contain line breaks ("Code: 403 (...)\nMessage: Forbidden\n") and end with a dot
+    static tstring OneLine(const tstring& text) {
         tstring msg;
-        for (TChar c : msg0) {
+        for (TChar c : text) {
             if (c == AR_T('\r') || c == AR_T('\n')) {
                 if (!msg.empty() && msg.back() != AR_T(' ')) msg += AR_T(' ');
             } else msg += c;
         }
-        while (msg.size() > 1 && msg[msg.size() - 2] == AR_T(' ') && msg.back() == AR_T('.')) msg.erase(msg.size() - 2, 1);
-        Log(AR_T("Update: ") + msg);
-        Set(State::Error, msg);
+        msg = Trim(msg);
+        while (!msg.empty() && msg.back() == AR_T('.')) msg.pop_back();
+        return msg;
+    }
+
+    void Fail(const char* key, std::vector<tstring> args = {}) {
+        busy_ = false;
+        for (auto& a : args) a = OneLine(a);
+        Set(State::Error, key, std::move(args));
+        Log(AR_T("Update: ") + message);
     }
 
     // A failed check is repeated at the next start after an hour instead of after the interval (Due)
@@ -175,13 +201,14 @@ private:
         if (!ok || !Json::Parse(data, j) || j.type != Json::Object) {
             SetFailed(true);
             ini.Save();
-            Fail(tstring(AR_T("Update check failed")) + (err.empty() ? tstring() : AR_T(": ") + err) + AR_T("."));
+            if (err.empty()) Fail("Update check failed.");
+            else Fail("Update check failed: %1.", {err});
             return;
         }
         if (j["tag_name"].type != Json::String) {  // e.g. {"message": "Not Found"} - no release yet
             SetFailed(true);
             ini.Save();
-            Fail(AR_T("No release found on GitHub."));
+            Fail("No release found on GitHub.");
             return;
         }
         latest = j["tag_name"].Str();
@@ -207,12 +234,12 @@ private:
         busy_ = false;
         if (CompareVersions(latest, AR_VERSION) <= 0) {
             Log(AR_T("Update: ") + T(latest) + AR_T(" is the latest version"));
-            Set(State::UpToDate, AR_T("You have the latest version (last check: ") + LastCheckText() + AR_T(")."));
+            Set(State::UpToDate, "You have the latest version (last check: %1).", {LastCheckText()});
             return;
         }
         Log(AR_T("Update: version ") + T(latest) + AR_T(" is available"));
-        Set(State::Available, AR_T("Version ") + T(latest) + AR_T(" is available") +
-                                  (assetUrl_.empty() ? tstring(AR_T(" (no package attached yet - see All releases).")) : tstring(AR_T("."))));
+        if (assetUrl_.empty()) Set(State::Available, "Version %1 is available (no package attached yet - see All releases).", {T(latest)});
+        else Set(State::Available, "Version %1 is available.", {T(latest)});
         // Automatic installation: each new version is opened only once
         if (autoInstall_ && !manual && !assetUrl_.empty() && ini.Str(AR_T("Updates"), AR_T("AutoOpened")) != T(latest)) {
             ini.Set(AR_T("Updates"), AR_T("AutoOpened"), T(latest));
@@ -226,8 +253,8 @@ private:
         std::string expected = digest_;
         for (auto& c : expected) c = (char)tolower((unsigned char)c);
         if (expected.size() != 64 || actual != expected) {
-            Fail(expected.empty() ? tstring(AR_T("The package has no SHA-256 checksum - not installed."))
-                                  : tstring(AR_T("Checksum mismatch - the download was discarded.")));
+            Fail(expected.empty() ? "The package has no SHA-256 checksum - not installed."
+                                  : "Checksum mismatch - the download was discarded.");
             return;
         }
         tstring dir = downloadDir.empty() ? SettingsDir() : downloadDir;
@@ -239,14 +266,14 @@ private:
 #endif
         bool ok = f && fwrite(data.data(), 1, data.size(), f) == data.size();
         if (f) ok = fclose(f) == 0 && ok;
-        if (!ok) { Fail(AR_T("Could not save ") + file + AR_T(".")); return; }
+        if (!ok) { Fail("Could not save %1.", {file}); return; }
         Log(AR_T("Update: ") + T(assetName_) + AR_T(" downloaded, SHA-256 OK - opening it in AIMP"));
         busy_ = false;
         if (OpenInAimp(file)) {
-            Set(State::Opened, AR_T("Version ") + T(latest) + AR_T(" was opened in AIMP - confirm the installation there; AIMP restarts by itself afterwards."));
+            Set(State::Opened, "Version %1 was opened in AIMP - confirm the installation there; AIMP restarts by itself afterwards.", {T(latest)});
             if (onPackageOpened) onPackageOpened();
         } else {
-            Fail(AR_T("Could not open ") + file + AR_T(" - please open it in AIMP yourself."));
+            Fail("Could not open %1 - please open it in AIMP yourself.", {file});
         }
     }
 
@@ -271,7 +298,7 @@ public:
 
     static tstring LastCheckText() {
         long long t = Ini::Get().Int(AR_T("Updates"), AR_T("LastCheck"), 0);
-        if (t <= 0) return AR_T("never");
+        if (t <= 0) return Tr("never");
         time_t tt = (time_t)t;
         struct tm lt;
 #ifdef _WIN32
@@ -300,21 +327,25 @@ public:
         if (busy_) return;
         busy_ = true;
         autoInstall_ = autoInstall;
-        Set(State::Checking, AR_T("Checking for updates..."));
+        Set(State::Checking, "Checking for updates...");
         if (!Get(AR_URL_API_LATEST, [this, manual](bool ok, const std::string& d, const tstring& e) { OnRelease(ok, d, e, manual); }))
-            Fail(AR_T("Update check not available (AIMP's HTTP client is missing)."));
+            Fail("Update check not available (AIMP's HTTP client is missing).");
     }
 
     void Install() {
         if (busy_ || assetUrl_.empty()) return;
         busy_ = true;
-        Set(State::Downloading, AR_T("Downloading ") + T(assetName_) + AR_T("..."));
+        Set(State::Downloading, "Downloading %1...", {T(assetName_)});
         auto download = [this] {
             if (!Get(assetUrl_, [this](bool ok, const std::string& d, const tstring& e) {
-                    if (!ok || d.empty()) { Fail(AR_T("Download failed") + (e.empty() ? tstring() : AR_T(": ") + e) + AR_T(".")); return; }
+                    if (!ok || d.empty()) {
+                        if (e.empty()) Fail("Download failed.");
+                        else Fail("Download failed: %1.", {e});
+                        return;
+                    }
                     Verify(d);
                 }))
-                Fail(AR_T("Download not available."));
+                Fail("Download not available.");
         };
         if (!digest_.empty() || checksumUrl_.empty()) { download(); return; }
         // Older GitHub releases have no digest: use the attached <package>.sha256 file
@@ -326,7 +357,10 @@ public:
     }
 
     // The new version is on disk: AIMP is restarted to load it
-    void Installed() { Set(State::Opened, AR_T("Update installed - restarting AIMP...")); }
+    void Installed() { Set(State::Opened, "Update installed - restarting AIMP..."); }
+
+    // Status line in the current language
+    tstring Message() const { return Fill(Tr(msgKey_), msgArgs_); }
 
     bool CanInstall() const { return state == State::Available && !assetUrl_.empty() && !busy_; }
 

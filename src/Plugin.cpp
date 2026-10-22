@@ -17,6 +17,16 @@ namespace ar {
 
 static Engine* g_engine = nullptr;
 static OptionsFrame* g_frame = nullptr;
+static bool g_updated = false;  // first start of a newer version than the last one (shown after loading)
+
+// After an update AIMP restarts to load the new version - tell the user why, once per version
+static void ShowUpdatedNotice() {
+    if (g_engine && !(g_frame && g_frame->IsOpen())) CurrentLanguage() = ResolveLanguage(g_engine->cfg.language);
+    tstring text = Trf("%1 for AIMP was updated to version %2.", {AR_T(AR_PLUGIN_NAME), AR_T(AR_VERSION)}) + AR_NL AR_NL +
+                   Trf("AIMP restarted to load the new version. The changes are on the About tab: "
+                       "Preferences \u2192 Plugins \u2192 %1 \u2192 About.", {AR_T(AR_PLUGIN_NAME)});
+    if (!ShowMessage(text)) Log(AR_T("Update notice could not be shown (no message dialog in this AIMP version)"));
+}
 
 class Hook : public ComObject<IAIMPMessageHook> {
 protected:
@@ -28,11 +38,17 @@ public:
         if (msg == (DWORD)AIMP_MSG_EVENT_STREAM_START) g_engine->OnStreamStart();
         else if (msg == (DWORD)AIMP_MSG_EVENT_PLAYER_STATE) g_engine->OnPlayerState(param1);
         else if (msg == (DWORD)AIMP_MSG_EVENT_LOADED) {
+            g_engine->bitPerfect.Apply(g_engine->cfg);
             g_engine->ResumeAfterRestart();
             const Config& c = g_engine->cfg;
             if (c.updateCheck && Updater::Due(c.updateInterval)) g_engine->updater.Check(false, c.updateAutoInstall);
+            if (g_updated) {
+                g_updated = false;
+                g_engine->Later(ShowUpdatedNotice);
+            }
         }
         else if (msg == (DWORD)AIMP_MSG_EVENT_PLAYER_UPDATE_POSITION && g_frame && g_frame->IsOpen()) g_frame->RefreshStats();
+        else if (msg == (DWORD)AIMP_MSG_EVENT_LANGUAGE && g_frame) g_frame->OnAimpLanguageChanged();
     }
 };
 
@@ -129,7 +145,23 @@ public:
             }
         }
         e->cfg.Load();
-        if (!Ini::Get().Existed()) e->cfg.Save();  // new installation: write all defaults (plugin off)
+        CurrentLanguage() = ResolveLanguage(e->cfg.language);
+        {
+            tstring aimpLang;
+            AimpLanguage(&aimpLang);
+            Log(AR_T("AIMP language: ") + (aimpLang.empty() ? tstring(AR_T("?")) : aimpLang) + AR_T(" -> plugin language: ") +
+                FromUtf8(LanguageName((Language)CurrentLanguage())) +
+                (e->cfg.language == LanguageSetting::Auto ? tstring(AR_T(" (automatic)")) : tstring()));
+        }
+        bool existed = Ini::Get().Existed();
+        if (!existed) e->cfg.Save();  // new installation: write all defaults (plugin off)
+        // Version of the last start: newer now = an update (versions before 2.5.6 did not store it)
+        tstring lastRun = Ini::Get().Str(AR_T("Updates"), AR_T("RunVersion"));
+        g_updated = existed && (lastRun.empty() || CompareVersions(ToUtf8(lastRun), AR_VERSION) < 0);
+        if (lastRun != AR_T(AR_VERSION)) {
+            Ini::Get().Set(AR_T("Updates"), AR_T("RunVersion"), AR_T(AR_VERSION));
+            Ini::Get().Save();
+        }
         e->LoadStats();
         g_engine = e;
         e->Start();
@@ -157,17 +189,26 @@ public:
 #endif
             AR_T(")"));
         Log(AR_T("Settings: ") + Ini::Get().Path() + (Ini::Get().Existed() ? AR_T("") : AR_T(" (new)")));
+        if (g_updated)
+            Log(AR_T("Updated from ") + (lastRun.empty() ? tstring(AR_T("an older version")) : lastRun) + AR_T(" to " AR_VERSION));
         if (!e->cfg.enabled)
             Log(AR_T("Plugin is disabled - enable it in Preferences -> Plugins -> " AR_PLUGIN_NAME));
         e->aimpSync.profileDir = dir;
         e->aimpSync.LogDiagnostics(e->player.Get());
         e->aimpSync.LoadResume();
+#ifdef _WIN32
+        // After a restart by the plugin: AIMP's windows back to their state, place and focus
+        if (!e->aimpSync.resume.windows.empty()) win::WindowRestorer::Get().Begin(e->aimpSync.resume.windows);
+#endif
         return S_OK;
     }
 
     HRESULT WINAPI Finalize() override {
         Engine* e = g_engine;
         if (!e) return S_OK;
+#ifdef _WIN32
+        win::WindowRestorer::Get().End();
+#endif
         if (disp_ && hook_) disp_->Unhook(hook_.Get());
         hook_.Reset();
         if (frame_) Core()->UnregisterExtension(frame_.Get());
@@ -176,6 +217,7 @@ public:
         g_engine = nullptr;
         e->onStatsChanged = nullptr;
         e->updater.Cancel();
+        e->PatchAimpIniAtExit();
         e->SaveStats();
         bool finished = e->Stop();
         Log(AR_T(AR_PLUGIN_NAME " stopped"));

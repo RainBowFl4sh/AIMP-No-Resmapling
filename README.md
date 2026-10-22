@@ -5,7 +5,7 @@
 It works with **WASAPI shared**, **Voicemeeter** (engine rate and the Windows format of all hardware outputs A1–A5) and, with an optional experimental AIMP restart, **ASIO**, **WASAPI exclusive** and **DirectSound** on Windows, plus **PipeWire** on Linux (there it currently keeps PipeWire at AIMP's own rate — see [Known limitations](#known-limitations)). Everything is set up directly in AIMP under *Preferences → Plugins → Prevent Resampling*. Supported: **AIMP 4.70, 5 and 6** (Windows 32/64 bit, AIMP 6 also on Linux).
 
 <p align="center">
-  <img src="docs/screenshots/settings-statistics.png" width="640" alt="Statistics tab while playing: track, output rate, device chain, Voicemeeter status and counters">
+  <img src="docs/screenshots/settings-statistics.png" width="640" alt="Advanced tab while playing: track, output rate, device chain, Voicemeeter status and counters">
 </p>
 
 > [!WARNING]
@@ -17,7 +17,7 @@ It works with **WASAPI shared**, **Voicemeeter** (engine rate and the Windows fo
 
 - [Installation](#installation)
 - [First steps](#first-steps)
-- [The settings page](#the-settings-page) — [General](#general) · [Output](#output) · [ASIO / Exclusive](#asio--exclusive) · [Voicemeeter](#voicemeeter) · [Statistics](#statistics) · [About](#about)
+- [The settings page](#the-settings-page) — [General](#general) · [Output](#output) · [ASIO / Exclusive](#asio--exclusive) · [Voicemeeter](#voicemeeter) · [Advanced](#advanced) · [About](#about)
 - [How it works](#how-it-works)
 - [Bit-perfect playback — what it needs](#bit-perfect-playback--what-it-needs)
 - [Known limitations](#known-limitations) · [Troubleshooting](#troubleshooting)
@@ -64,7 +64,7 @@ The plugin file must be **directly** in the `PreventResampling` folder — AIMP 
 3. **Output:** leave *Output type* on *Automatic*. The plugin reads AIMP's output device and knows what to switch.
 4. **Voicemeeter users:** tick *Auto restart audio engine (all devices)* in Voicemeeter's own settings (see [Voicemeeter](#voicemeeter)).
 5. **ASIO / WASAPI exclusive / DirectSound users:** these outputs only follow the track with the experimental AIMP restart. Read the [ASIO / Exclusive](#asio--exclusive) section before you enable it.
-6. Play some music and watch the *Statistics* tab: *Output rate … (bit-perfect, no resampling)* means it works.
+6. Play some music and watch the *Advanced* tab: *Output rate … (bit-perfect, no resampling)* means it works.
 
 ## The settings page
 
@@ -78,7 +78,6 @@ The page uses AIMP's own controls, so it follows your skin and works on Windows 
 - **Fall back to integer multiples**: if a device cannot play a rate, the plugin picks a multiple of the same family (44.1 → 88.2 → 176.4 kHz, 48 → 96 → 192 kHz) instead of giving up.
 - **Restore the original sample rates when AIMP closes**: Windows devices and Voicemeeter go back to the rates they had before the session. A restart by the plugin itself (ASIO / exclusive) does *not* restore, so the restarted AIMP does not have to switch again.
 - **Automatic timing based on your hardware**: the plugin detects CPU threads, clock and RAM and picks how long to wait after a switch (see [Timing](#timing-and-hardware-detection)). Turn it off to set a fixed settle time.
-- **Settings file and log**: *Open folder* opens the folder with `PreventResampling.ini` and `PreventResampling.log`.
 
 ### Output
 
@@ -88,7 +87,7 @@ The page uses AIMP's own controls, so it follows your skin and works on Windows 
 - **Output type**: *Automatic* (recommended) detects WASAPI shared, WASAPI exclusive, ASIO or DirectSound from AIMP's output. You can force a type if detection fails.
 - **Windows device**: the device whose Windows format is switched for WASAPI shared and DirectSound. *Automatic* takes it from AIMP's output, otherwise the Windows default device.
 - **Additional devices to switch**: parts of device names separated by `;` (e.g. `FiiO; Realtek Digital`), switched together with the main device.
-- **Bit-perfect playback**: what you have to switch off in AIMP for a truly bit-perfect signal — see [below](#bit-perfect-playback--what-it-needs).
+- **Bit-perfect mode**: one tick switches off everything in AIMP that changes the signal (crossfade, equalizer, sound effects incl. stereo enhancer, ReplayGain, peak normalization, loudness compensation). Two more options appear: **volume to 100 %** and **no gapless playback** (AIMP's short pause between tracks). Unticking brings your previous AIMP settings back, also after AIMP was restarted — see [below](#bit-perfect-playback--what-it-needs).
 
 ### ASIO / Exclusive
 
@@ -127,9 +126,14 @@ Only relevant if you use **Voicemeeter** (Standard, Banana or Potato; VB-Audio, 
 
 The **A1 output device** list (WDM / KS / MME / ASIO) comes straight from Voicemeeter; the choice is sent to Voicemeeter when you click *Apply*. The plugin never starts Voicemeeter. If it is not installed or not running, this part stays inactive; if Voicemeeter is started while AIMP runs, the plugin notices it within a few seconds and switches the current track. On Linux the tab shows all options greyed out with a *Linux detected – this tab is disabled* note; support for Linux mixers such as Pulsemeeter may follow.
 
-### Statistics
+### Advanced
 
-<img src="docs/screenshots/settings-statistics.png" width="640" alt="Statistics tab">
+<img src="docs/screenshots/settings-statistics.png" width="640" alt="Advanced tab">
+
+- **Language**: *Automatic* follows AIMP's language (English, German, Russian and Ukrainian are translated; every other language shows English), or pick one of the four. The new language is shown at once and stored with *OK* / *Apply*. The log stays English.
+- **Settings file**: *Export...* saves the plugin's settings (the `[PreventResampling]` section, as shown on the page) to a file of your choice, *Import...* loads such a file and saves it right away, *Open folder* opens the folder of the settings file and the log.
+
+The rest of the tab shows the statistics:
 
 - **Now playing**: AIMP output, detected mode, track (rate / bits / channels), AIMP's own rate, the output rate with a *bit-perfect* or *integer multiple* note, the device chain, Voicemeeter status and the timing profile.
 - **Counters**: analysed tracks, switches, already matching, failed, Voicemeeter and AIMP restarts, switch time (last / average).
@@ -176,6 +180,8 @@ The plugin keeps the output at the track's sample rate. For a truly bit-perfect 
 - switch off **crossfade**, the **equalizer** and **DSP effects**, **normalisation / ReplayGain**, and keep AIMP's **volume at 100 %**;
 - **gapless** playback keeps working between tracks with the same rate. When the rate changes there is a short pause, because the device has to be reopened. That is intended: tracks with different rates cannot be blended bit-perfectly.
 
+The **bit-perfect mode** on the Output tab does all of this with one tick. Crossfade, equalizer, effects, volume and the pause between tracks change at once. ReplayGain, peak normalization, loudness compensation and the voice remover are only read by AIMP at start-up: the plugin writes them into AIMP.ini after AIMP has closed, so they follow with the next start (*Restart AIMP now* does it right away). The previous values are kept in the plugin's settings file (section `[BitPerfectSaved]`) until the mode is switched off again. In Voicemeeter, do not use its equalizer or other effects on the bus and keep the fader at 0 dB.
+
 With crossfade or effects on, playback is **not** bit-perfect, and the plugin then only prevents resampling. Voicemeeter works internally with 32-bit float, so strictly bit-perfect is only the direct path (exclusive / ASIO without Voicemeeter); with Voicemeeter there is at least no resampling.
 
 ## Settings file and log
@@ -199,7 +205,7 @@ The settings file is created with all defaults on the first start (plugin **disa
 
 - **Plugin does not appear in AIMP:** check that you use AIMP 4.70 or newer. Install it with the `.aimppack` and restart AIMP. When copying by hand, the plugin file has to be directly in `Plugins/PreventResampling/` (no `x64` sub-folder), the ZIP has to match your AIMP (32 or 64 bit), and the plugin has to be ticked under *Preferences → Plugins*.
 - **Installing over an older version fails:** use the `.aimppack`, not the DLL. AIMP is running and holds the old DLL.
-- **Nothing happens:** the plugin is off after installation — enable it on the *General* tab. Then check the *Statistics* tab or the log. With ASIO / WASAPI exclusive / DirectSound the restart option must be enabled.
+- **Nothing happens:** the plugin is off after installation — enable it on the *General* tab. Then check the *Advanced* tab or the log. With ASIO / WASAPI exclusive / DirectSound the restart option must be enabled.
 - **A Voicemeeter output turns red:** tick *Auto restart audio engine (all devices)* in Voicemeeter.
 - **"No suitable rate":** the driver reports no support for the rate (and no multiple) in exclusive mode.
 - **AIMP does not come back after a restart:** start AIMP yourself. The log shows each step of the restart helper. Disable the restart option if it happens again.
@@ -230,7 +236,7 @@ sudo apt install cmake g++ pkg-config libcairo2-dev git   # cairo: headers only,
 
 ## Tests
 
-`tests/MockHost.cpp` is a minimal AIMP stand-in (with the UI mock `tests/mock_ui.h` from the Discord Rich Presence plugin). It loads the plugin, "plays" tracks, and checks the defaults, PipeWire calls, configuration, statistics, the restart helper, the update check (including the restart after an update and a failed check), AIMP 4 without the output property, and a clean shutdown.
+`tests/MockHost.cpp` is a minimal AIMP stand-in (with the UI mock `tests/mock_ui.h` from the Discord Rich Presence plugin). It loads the plugin, "plays" tracks, and checks the defaults, PipeWire calls, configuration, statistics, the four languages (layout and complete translations), export and import of the settings, the restart helper, the update check (including the restart after an update and a failed check), AIMP 4 without the output property, and a clean shutdown.
 
 `tests/fakevm/FakeVoicemeeterRemote.c` is a stand-in for `VoicemeeterRemote(64).dll` that simulates Voicemeeter Banana and logs every call (`running=0` in `C:\vmfake.ini` simulates a Voicemeeter that is not started yet) — used to test the Voicemeeter chain in real AIMP builds under Wine (build with MinGW and `-shared -Wl,--kill-at`, register it like the real Voicemeeter under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\VB:Voicemeeter {17359A74-1236-5467}`). It also builds the settings page and checks its layout; `tests/render_layout.py <layout.txt> <folder>` draws that layout as one PNG per tab.
 

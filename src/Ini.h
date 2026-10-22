@@ -127,6 +127,15 @@ public:
         }
     }
 
+    // Starts an empty file at path (written by Save) - for exporting the settings
+    void Create(const tstring& path) {
+        path_ = path;
+        sections_.clear();
+        existed_ = false;
+    }
+
+    bool HasSection(const tstring& section) { return Find(section, false) != nullptr; }
+
     bool Save() {
         if (path_.empty()) return false;
         std::string out;
@@ -190,6 +199,13 @@ public:
     }
     void Set(const tstring& section, const tstring& key, long long v) { Set(section, key, Num(v)); }
     void SetBool(const tstring& section, const tstring& key, bool v) { Set(section, key, Num(v ? 1 : 0)); }
+
+    void Remove(const tstring& section, const tstring& key) {
+        Entries* e = Find(section, false);
+        if (!e) return;
+        for (size_t k = 0; k < e->size(); k++)
+            if (EqualsI((*e)[k].first, key)) { e->erase(e->begin() + (long)k); return; }
+    }
 
     void Clear(const tstring& section) {
         Entries* e = Find(section, false);

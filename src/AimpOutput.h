@@ -8,6 +8,7 @@
 #include <ctime>
 
 #include "AimpUtil.h"
+#include "Ini.h"
 #include "apiPlayer.h"
 
 namespace ar {
@@ -106,6 +107,7 @@ struct ResumeInfo {
     double position = 0;
     uint32_t rate = 0;
     long long time = 0;  // Unix time of the restart
+    tstring windows;     // Windows: AIMP's windows before the restart (win::SaveWindowsLine)
 };
 
 class AimpOutputSync {
@@ -148,7 +150,7 @@ public:
     // ---- Continue after a restart: small text file in the profile folder
     void SaveResume(const ResumeInfo& r) {
         std::string data = ToUtf8(r.file) + "\n" + std::to_string((long long)(r.position * 1000)) + "\n" +
-                           std::to_string(r.rate) + "\n" + std::to_string(r.time) + "\n";
+                           std::to_string(r.rate) + "\n" + std::to_string(r.time) + "\n" + ToUtf8(r.windows) + "\n";
 #ifdef _WIN32
         FILE* f = _wfopen(ResumePath().c_str(), L"wb");
 #else
@@ -197,6 +199,7 @@ public:
         resume.position = atoll(parts[1].c_str()) / 1000.0;
         resume.rate = (uint32_t)atol(parts[2].c_str());
         resume.time = t;
+        if (parts.size() >= 5) resume.windows = FromUtf8(parts[4]);
     }
 };
 

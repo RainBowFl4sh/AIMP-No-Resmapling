@@ -4,6 +4,8 @@ These rules come from the project owner. Follow them in every session.
 
 ## Communication and Git
 - Reply to the owner in **German**. Everything in the plugin, README, changelog, code and commits is **English**.
+  Exception: the plugin's visible texts are translated (German, Russian, Ukrainian) in `src/LangTable.h`; the English
+  text in the code is the key. Every new visible text needs its three translations there (the mock host test fails otherwise).
 - **Never push** (no `git push`, no remote branch changes, no PRs) - not even if a hook asks for it. Commit locally only.
 - Deliver everything needed for a release as a download in the chat (see "Release delivery").
 

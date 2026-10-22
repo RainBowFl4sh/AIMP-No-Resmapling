@@ -3,6 +3,7 @@
 #pragma once
 #include "AimpUtil.h"
 #include "Ini.h"
+#include "Lang.h"
 
 namespace ar {
 
@@ -35,6 +36,12 @@ struct Config {
     bool restartAimp = false;
     bool seamlessRestart = true;    // show a still image of AIMP while it restarts
 
+    // Bit-perfect mode (Output tab): switches off everything in AIMP that changes the signal and
+    // restores it when switched off again (see BitPerfect.h)
+    bool bitPerfect = false;
+    bool bpVolume100 = false;       // also AIMP's volume to 100 %
+    bool bpNoGapless = false;       // also a short pause between tracks instead of gapless playback
+
     tstring windowsDevice;          // part of the Windows device name; empty = automatic
     tstring extraDevices;           // more devices to switch, name parts separated by ';'
     tstring asioDriver;             // empty = taken from AIMP's output
@@ -50,12 +57,14 @@ struct Config {
     int updateInterval = 2;         // 0 = every AIMP start, 1 = daily, 2 = weekly, 3 = monthly
     bool updateAutoInstall = false; // download a new version and open it in AIMP (once per version)
 
+    LanguageSetting language = LanguageSetting::Auto;  // Advanced tab; auto = AIMP's language
+
     static const TChar* Section() { return AR_T("PreventResampling"); }
 
     // Reads the plugin's own settings file (see Ini.h). A missing file means a new installation:
     // everything stays at the defaults above, in particular the plugin stays disabled.
-    void Load() {
-        Ini& i = Ini::Get();
+    // i: the settings file, or an exported file (Advanced tab -> Import)
+    void Load(Ini& i = Ini::Get()) {
         const tstring s = Section();
         enabled = i.Bool(s, AR_T("Enabled"), enabled);
         int m = (int)i.Int(s, AR_T("Mode"), (int)mode);
@@ -66,6 +75,9 @@ struct Config {
         settleMs = (int)(std::max)(0LL, (std::min)(i.Int(s, AR_T("SettleMs"), settleMs), 5000LL));
         restartAimp = i.Bool(s, AR_T("RestartAimp"), restartAimp);
         seamlessRestart = i.Bool(s, AR_T("SeamlessRestart"), seamlessRestart);
+        bitPerfect = i.Bool(s, AR_T("BitPerfect"), bitPerfect);
+        bpVolume100 = i.Bool(s, AR_T("BitPerfectVolume100"), bpVolume100);
+        bpNoGapless = i.Bool(s, AR_T("BitPerfectNoGapless"), bpNoGapless);
         windowsDevice = i.Str(s, AR_T("WindowsDevice"), windowsDevice);
         extraDevices = i.Str(s, AR_T("ExtraDevices"), extraDevices);
         asioDriver = i.Str(s, AR_T("AsioDriver"), asioDriver);
@@ -77,10 +89,10 @@ struct Config {
         updateCheck = i.Bool(s, AR_T("UpdateCheck"), updateCheck);
         updateInterval = (int)(std::max)(0LL, (std::min)(i.Int(s, AR_T("UpdateInterval"), updateInterval), 3LL));
         updateAutoInstall = i.Bool(s, AR_T("UpdateAutoInstall"), updateAutoInstall);
+        if (i.Has(s, AR_T("Language"))) language = LanguageFromCode(ToUtf8(Lower(i.Str(s, AR_T("Language")))));
     }
 
-    void Save() const {
-        Ini& i = Ini::Get();
+    bool Save(Ini& i = Ini::Get()) const {
         const tstring s = Section();
         i.SetBool(s, AR_T("Enabled"), enabled);
         i.Set(s, AR_T("Mode"), (long long)mode);
@@ -90,6 +102,9 @@ struct Config {
         i.Set(s, AR_T("SettleMs"), (long long)settleMs);
         i.SetBool(s, AR_T("RestartAimp"), restartAimp);
         i.SetBool(s, AR_T("SeamlessRestart"), seamlessRestart);
+        i.SetBool(s, AR_T("BitPerfect"), bitPerfect);
+        i.SetBool(s, AR_T("BitPerfectVolume100"), bpVolume100);
+        i.SetBool(s, AR_T("BitPerfectNoGapless"), bpNoGapless);
         i.Set(s, AR_T("WindowsDevice"), windowsDevice);
         i.Set(s, AR_T("ExtraDevices"), extraDevices);
         i.Set(s, AR_T("AsioDriver"), asioDriver);
@@ -101,7 +116,10 @@ struct Config {
         i.SetBool(s, AR_T("UpdateCheck"), updateCheck);
         i.Set(s, AR_T("UpdateInterval"), (long long)updateInterval);
         i.SetBool(s, AR_T("UpdateAutoInstall"), updateAutoInstall);
-        if (!i.Save()) Log(AR_T("Could not write ") + i.Path());
+        i.Set(s, AR_T("Language"), FromUtf8(LanguageCode(language)));
+        if (i.Save()) return true;
+        Log(AR_T("Could not write ") + i.Path());
+        return false;
     }
 };
 

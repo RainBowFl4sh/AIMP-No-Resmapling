@@ -9,6 +9,7 @@
 #include <functional>
 
 #include "AimpOutput.h"
+#include "BitPerfect.h"
 #include "AimpUtil.h"
 #include "Hardware.h"
 #include "RateController.h"
@@ -53,6 +54,7 @@ public:
     Hardware hw;               // detected once at start-up
     Updater updater;           // About tab: update check (main thread)
     AimpOutputSync aimpSync;   // main thread only
+    BitPerfect bitPerfect;     // main thread only
     std::function<void()> onStatsChanged;  // main thread; refreshes the settings page
 
 private:
@@ -75,6 +77,7 @@ private:
     uint32_t lastRate_ = 0;
     int64_t lastTime_ = 0;
     tstring restartFile_;  // main thread only: file the plugin is restarting right now
+    bool patchesHandedOver_ = false;  // main thread: a restart helper writes the bit-perfect values
     bool resumed_ = false;
     bool waitingForPlay_ = false;  // main thread only: a track was loaded while AIMP was not playing
     tstring handledFile_;          // main thread only: file of the last track the plugin looked at
@@ -103,23 +106,31 @@ private:
     // asynchronously afterwards (see Handle). false = not possible.
     bool RestartAimpForRate(const tstring& file, double pos, uint32_t hz, bool seamless) {
 #ifdef _WIN32
-        if (aimpSync.rateKey.empty() || aimpSync.profileDir.empty()) return false;
+        if ((hz && aimpSync.rateKey.empty()) || aimpSync.profileDir.empty()) return false;
         ResumeInfo r;
         r.file = file;
         r.position = pos;
         r.rate = hz;
         r.time = (long long)time(nullptr);
+        r.windows = win::SaveWindowsLine();
         aimpSync.SaveResume(r);
+        bool background = !r.windows.empty() && r.windows[0] == L'0';
         HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, win::ReadyEventName(GetCurrentProcessId()).c_str());
-        if (!win::LaunchRestartHelper(hz, aimpSync.profileDir + AR_T("AIMP.ini"), aimpSync.rateKey, seamless)) {
+        tstring patches = BpPatchText(bitPerfect.Pending(cfg));
+        if (!win::LaunchRestartHelper(hz, aimpSync.profileDir + AR_T("AIMP.ini"), aimpSync.rateKey, seamless, background, patches)) {
             if (ready) CloseHandle(ready);
             return false;
         }
         if (ready) {
-            WaitForSingleObject(ready, seamless ? 2500 : 1000);
+            // The helper signals when the still image is on screen. A slow start (e.g. a virus scanner
+            // checking rundll32) must not close AIMP before that, or the restart is visible.
+            if (WaitForSingleObject(ready, seamless ? 6000 : 1000) != WAIT_OBJECT_0 && seamless)
+                Log(AR_T("Restart helper did not answer in time - AIMP closes without still image"));
             CloseHandle(ready);
         }
-        Log(AR_T("Restarting AIMP with ") + Khz(hz) + AR_T(" (") + aimpSync.rateKey + AR_T(")"));
+        patchesHandedOver_ = true;
+        Log(hz ? AR_T("Restarting AIMP with ") + Khz(hz) + AR_T(" (") + aimpSync.rateKey + AR_T(")")
+               : tstring(AR_T("Restarting AIMP to apply the bit-perfect mode")));
         return true;
 #else
         (void)file; (void)pos; (void)hz; (void)seamless;
@@ -132,7 +143,7 @@ private:
         if (!sessionLoaded_) {
             // After a restart by the plugin: take over the original rates of the previous AIMP process
             sessionLoaded_ = true;
-            OnMain([this, &rc] { rc.LoadSession(!aimpSync.resume.file.empty()); }, true);
+            OnMain([this, &rc] { rc.LoadSession(aimpSync.resume.time != 0); }, true);
         }
         Timing tm = Timing::For(hw, j.cfg.autoTiming, j.cfg.settleMs);
         rc.SetConfig(j.cfg, tm);
@@ -454,6 +465,39 @@ public:
         }
     }
 
+    // Main thread: restarts AIMP so the bit-perfect settings it only reads at start-up take effect
+    // (Output tab -> "Restart AIMP now"). The track continues at the same position.
+    void RestartForSettings() {
+#ifdef _WIN32
+        tstring file;
+        double pos = 0;
+        if (player && player->GetState() == AIMP_PLAYER_STATE_PLAYING) {
+            file = CurrentFile();
+            player->GetPosition(&pos);
+        }
+        if (!RestartAimpForRate(file, pos, 0, cfg.seamlessRestart)) {
+            Log(AR_T("AIMP could not be restarted - the bit-perfect settings follow with the next start"));
+            return;
+        }
+        selfRestart_ = true;  // keep the current rates; the new AIMP takes the session over
+        auto sd = Service<IAIMPServiceShutdown>(IID_IAIMPServiceShutdown);
+        if (!sd || Failed(sd->Shutdown(AIMP_SERVICE_SHUTDOWN_FLAGS_CLOSE_APP | AIMP_SERVICE_SHUTDOWN_FLAGS_NO_CONFIRM)))
+            Log(AR_T("AIMP could not be closed"));
+#endif
+    }
+
+    // Main thread, while AIMP closes: settings AIMP only reads at start-up are written into AIMP.ini
+    // once it has closed (AIMP writes its own values first), unless a restart helper does it already
+    void PatchAimpIniAtExit() {
+#ifdef _WIN32
+        if (patchesHandedOver_ || aimpSync.profileDir.empty()) return;
+        auto p = bitPerfect.Pending(cfg);
+        if (p.empty()) return;
+        if (win::LaunchRestartHelper(0, aimpSync.profileDir + AR_T("AIMP.ini"), tstring(), false, true, BpPatchText(p), AR_T("-")))
+            Log(AR_T("Bit-perfect mode: AIMP.ini is changed after AIMP has closed"));
+#endif
+    }
+
 private:
     void StopWatcher() {
         watchStop_ = true;
@@ -475,6 +519,9 @@ public:
         else worker_.detach();
         return done_;
     }
+
+    // Runs f on the main thread later (e.g. a dialog that must not block the current event)
+    void Later(std::function<void()> f) { OnMain(std::move(f), false); }
 
     // Main thread, after AIMP_MSG_EVENT_LOADED: continue the track after a restart by the plugin
     void ResumeAfterRestart() {
