@@ -62,7 +62,7 @@ jobs:
         run: |
           SDK=sdk
           x86_64-w64-mingw32-g++ -std=c++17 -O1 -DUNICODE -D_UNICODE -DNOMINMAX -Dwtoll=_wtoi64 -isystem $SDK \
-            tests/MockHost.cpp $SDK/apiTypes.cpp -o build/MockHost.exe -static -lole32 -loleaut32 -luuid
+            tests/MockHost.cpp $SDK/apiTypes.cpp -o build/MockHost.exe -static -lole32 -loleaut32 -luuid -lgdi32 -luser32
           mkdir -p build/wine && cp build/MockHost.exe dist/PreventResampling/x64/PreventResampling.dll build/wine/
           cd build/wine && WINEDEBUG=-all WINEPREFIX=$PWD/prefix timeout 300 /usr/lib/wine/wine64 MockHost.exe PreventResampling.dll .
           # The restart helper (rundll32) keeps running after the test: AIMP.ini must contain 96000
