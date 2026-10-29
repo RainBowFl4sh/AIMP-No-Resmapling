@@ -87,7 +87,7 @@ The page uses AIMP's own controls, so it follows your skin and works on Windows 
 - **Output type**: *Automatic* (recommended) detects WASAPI shared, WASAPI exclusive, ASIO or DirectSound from AIMP's output. You can force a type if detection fails.
 - **Windows device**: the device whose Windows format is switched for WASAPI shared and DirectSound. *Automatic* takes it from AIMP's output, otherwise the Windows default device.
 - **Additional devices to switch**: parts of device names separated by `;` (e.g. `FiiO; Realtek Digital`), switched together with the main device.
-- **Bit-perfect mode**: one tick switches off everything in AIMP that changes the signal (crossfade, equalizer, sound effects incl. stereo enhancer, ReplayGain, peak normalization, loudness compensation). Two more options appear: **volume to 100 %** and **no gapless playback** (AIMP's short pause between tracks). Unticking brings your previous AIMP settings back, also after AIMP was restarted — see [below](#bit-perfect-playback--what-it-needs).
+- **Bit-perfect mode**: one tick switches off everything in AIMP that changes the signal (crossfade, equalizer, sound effects incl. stereo enhancer, ReplayGain, peak normalization, loudness compensation). Two more options appear: **volume to 100 %** and **no gapless playback** (AIMP's short pause between tracks). Unticking brings your previous AIMP settings back, also after AIMP was restarted. The mode only works while the plugin is enabled: with the plugin disabled it is greyed out and AIMP keeps (or gets back) its own settings — see [below](#bit-perfect-playback--what-it-needs).
 
 ### ASIO / Exclusive
 
@@ -145,7 +145,7 @@ The rest of the tab shows the statistics:
 
 <img src="docs/screenshots/settings-about.png" width="640" alt="About tab">
 
-Version and platform, links to this repository (*GitHub page*, *All releases*, *Report a problem*), the **update check** (at every AIMP start, once a day / week / month, or off; *Check now*; *Install updates automatically*, once per version) and the complete changelog with the installed version on top. Updates are downloaded through AIMP's own HTTP client (AIMP's proxy settings apply) and only installed after the SHA-256 checksum matches.
+Version and platform, the author, *Support this plugin* (a PayPal donation link, entirely optional), links to this repository (*GitHub page*, *All releases*, *Report a problem*), the **update check** (at every AIMP start, once a day / week / month, or off; *Check now*; *Install updates automatically*, once per version) and the complete changelog with the installed version on top. Updates are downloaded through AIMP's own HTTP client (AIMP's proxy settings apply) and only installed after the SHA-256 checksum matches.
 
 ## How it works
 
@@ -186,10 +186,15 @@ With crossfade or effects on, playback is **not** bit-perfect, and the plugin th
 
 ## Settings file and log
 
+Both files are in AIMP's profile folder, next to `AIMP.ini`:
+
 | Platform | Settings | Log |
 |---|---|---|
 | Windows | `%APPDATA%\AIMP\PreventResampling.ini` | `%APPDATA%\AIMP\PreventResampling.log` |
-| Linux | `~/.config/AIMP/PreventResampling.ini` | AIMP profile folder |
+| Windows, portable AIMP | `<AIMP folder>\Profile\PreventResampling.ini` | `<AIMP folder>\Profile\PreventResampling.log` |
+| Linux | `~/.config/AIMP/PreventResampling.ini` | `~/.config/AIMP/PreventResampling.log` |
+
+Versions before 2.6.1 kept the settings in `%APPDATA%\AIMP` even for a portable AIMP; a portable AIMP takes that file over once, on its first start with 2.6.1.
 
 The settings file is created with all defaults on the first start (plugin **disabled**, AIMP restart **off**). Its sections are `[PreventResampling]` (options), `[Statistics]` (counters), `[Updates]` (last update check) and, only for a moment during a restart by the plugin, `[Session]`. Delete the file to reset everything. The log shows start-up, detected hardware and devices, chosen rates and every switch, including the restart helper's steps.
 
@@ -198,6 +203,7 @@ The settings file is created with all defaults on the first start (plugin **disa
 - The Windows device format can only be changed through the **undocumented** `IPolicyConfig` interface. Windows updates may break it.
 - In shared mode and with Voicemeeter the track is paused briefly on a rate change, because AIMP opens the device before the plugin knows the rate.
 - ASIO / WASAPI exclusive / DirectSound only follow the track with the experimental restart option.
+- Internet radio and other streams (URLs) are never switched: switching would interrupt the stream (and with the restart option restart AIMP on every station). They play at the current rate; the log says *internet stream - not switched*.
 - ASIO: most drivers allow only one client. *Set the ASIO driver's rate directly* only works if AIMP releases the driver when stopping.
 - Linux: AIMP for Linux (6.00 Beta 7) always resamples to its own fixed rate, like on Windows. Until the AIMP restart is available on Linux, the plugin only keeps PipeWire at AIMP's rate, which avoids a second resampling step; playback is not yet bit-perfect for tracks with other rates. Only PipeWire is switched (plain PulseAudio is not).
 
@@ -225,7 +231,7 @@ build.bat "C:\aimp_sdk\Sources\Cpp"   :: use your own SDK copy
 **Linux** (native plugin and Windows DLLs via MinGW):
 
 ```sh
-sudo apt install cmake g++ pkg-config libcairo2-dev git   # cairo: headers only, required by the SDK
+sudo apt install cmake g++ pkg-config libcairo2-dev git   # cairo: required by the SDK, draws the About picture
 ./build.sh            # Linux .so + test
 ./build.sh all        # additionally Windows 32/64 bit (package mingw-w64)
 ```
@@ -246,4 +252,4 @@ cmake -S . -B build -DAR_BUILD_TESTS=ON && cmake --build build && ctest --test-d
 
 ## License
 
-Not decided yet. The AIMP SDK in `sdk/` is © Artem Izmaylov and subject to AIMP's license.
+[MIT](LICENSE) © 2026 Fl4sh (RainBowFl4sh). The AIMP SDK headers in `sdk/` are not covered: they are © Artem Izmaylov and subject to AIMP's license.

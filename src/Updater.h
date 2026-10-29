@@ -7,6 +7,7 @@
 #include <spawn.h>
 #endif
 #include <cctype>
+#include <cstring>
 #include <ctime>
 #include <functional>
 #include <memory>
@@ -25,12 +26,17 @@
 extern char** environ;
 #endif
 
-#define AR_REPO "RainBowFl4sh/AIMP-No-Resmapling"
-#define AR_URL_GITHUB "https://github.com/" AR_REPO
+#define AR_REPO "RainBowFl4sh/AIMP-No-Resampling"
+// Name up to 2.6.1: asked while the repository still has it, and its download links are accepted.
+// Links use it too: GitHub forwards the old name after the rename, the new one works only after it
+#define AR_REPO_OLD "RainBowFl4sh/AIMP-No-Resmapling"
+#define AR_URL_GITHUB "https://github.com/" AR_REPO_OLD
 #define AR_URL_RELEASES AR_URL_GITHUB "/releases"
 #define AR_URL_ISSUES AR_URL_GITHUB "/issues"
 #define AR_URL_AUTHOR "https://github.com/RainBowFl4sh"
+#define AR_URL_DONATE "https://www.paypal.com/donate/?hosted_button_id=TNTR6BR72JZ6E"  // same as in Discord RP
 #define AR_URL_API_LATEST "https://api.github.com/repos/" AR_REPO "/releases/latest"
+#define AR_URL_API_LATEST_OLD "https://api.github.com/repos/" AR_REPO_OLD "/releases/latest"
 
 namespace ar {
 
@@ -56,12 +62,14 @@ inline int CompareVersions(const std::string& a, const std::string& b) {
 
 // Files are only downloaded from this repository's releases and saved under their plain name
 inline bool IsReleaseDownload(const std::string& url) {
-    static const char prefix[] = AR_URL_RELEASES "/download/";
-    const size_t n = sizeof(prefix) - 1;
-    if (url.size() <= n) return false;
-    for (size_t i = 0; i < n; i++)
-        if (tolower((unsigned char)url[i]) != tolower((unsigned char)prefix[i])) return false;
-    return true;
+    auto starts = [&url](const char* prefix) {
+        const size_t n = strlen(prefix);
+        if (url.size() <= n) return false;
+        for (size_t i = 0; i < n; i++)
+            if (tolower((unsigned char)url[i]) != tolower((unsigned char)prefix[i])) return false;
+        return true;
+    };
+    return starts("https://github.com/" AR_REPO "/releases/download/") || starts(AR_URL_RELEASES "/download/");
 }
 
 inline bool IsPlainFileName(const std::string& name) {
@@ -257,7 +265,7 @@ private:
                                   : "Checksum mismatch - the download was discarded.");
             return;
         }
-        tstring dir = downloadDir.empty() ? SettingsDir() : downloadDir;
+        tstring dir = downloadDir.empty() ? LegacySettingsDir() : downloadDir;
         tstring file = dir + AR_T(AR_SEP) + T(assetName_);
 #ifdef _WIN32
         FILE* f = _wfopen(file.c_str(), L"wb");
@@ -328,7 +336,17 @@ public:
         busy_ = true;
         autoInstall_ = autoInstall;
         Set(State::Checking, "Checking for updates...");
-        if (!Get(AR_URL_API_LATEST, [this, manual](bool ok, const std::string& d, const tstring& e) { OnRelease(ok, d, e, manual); }))
+        auto onOld = [this, manual](bool ok, const std::string& d, const tstring& e) { OnRelease(ok, d, e, manual); };
+        auto onNew = [this, manual, onOld](bool ok, const std::string& d, const tstring& e) {
+            Json j;
+            if (ok && Json::Parse(d, j) && j.type == Json::Object && j["tag_name"].type == Json::String) {
+                OnRelease(ok, d, e, manual);
+                return;
+            }
+            // Not found under the new name: the repository is not renamed yet, ask under the old one
+            if (!Get(AR_URL_API_LATEST_OLD, onOld)) OnRelease(ok, d, e, manual);
+        };
+        if (!Get(AR_URL_API_LATEST, onNew))
             Fail("Update check not available (AIMP's HTTP client is missing).");
     }
 

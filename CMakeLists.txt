@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(PreventResampling VERSION 2.6.0 LANGUAGES CXX)
+project(PreventResampling VERSION 2.6.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -79,7 +79,7 @@ set_target_properties(PreventResampling PROPERTIES
 
 if(WIN32)
   target_compile_definitions(PreventResampling PRIVATE UNICODE _UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS)
-  target_link_libraries(PreventResampling PRIVATE ole32 oleaut32 uuid advapi32 user32 gdi32 shell32 comdlg32)
+  target_link_libraries(PreventResampling PRIVATE ole32 oleaut32 uuid advapi32 user32 gdi32 gdiplus shell32 comdlg32)
   if(MSVC)
     # Static runtime: users do not need the VC++ redistributable
     set_property(TARGET PreventResampling PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -94,13 +94,14 @@ if(WIN32)
     target_link_options(PreventResampling PRIVATE -static -static-libgcc -static-libstdc++ -Wl,--kill-at -s)
   endif()
 else()
-  # Linux: the SDK includes <cairo.h> (headers only, no library needed)
+  # Linux: the SDK includes <cairo.h>; cairo draws the author's picture on the About tab (AIMP for Linux
+  # itself is built on it, the canvas it passes is a cairo_t*)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(CAIRO REQUIRED cairo)
   find_package(Threads REQUIRED)
   target_include_directories(PreventResampling PRIVATE ${CAIRO_INCLUDE_DIRS})
   target_compile_options(PreventResampling PRIVATE -Wall -Wno-unknown-pragmas -Wno-attributes)
-  target_link_libraries(PreventResampling PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+  target_link_libraries(PreventResampling PRIVATE Threads::Threads ${CMAKE_DL_LIBS} ${CAIRO_LIBRARIES})
   target_link_options(PreventResampling PRIVATE -Wl,--no-undefined -Wl,-z,defs -s)
 endif()
 
@@ -125,7 +126,7 @@ if(AR_BUILD_TESTS AND UNIX)
   enable_testing()
   add_executable(MockHost tests/MockHost.cpp "${AIMP_SDK_DIR}/apiTypes.cpp")
   target_include_directories(MockHost SYSTEM PRIVATE "${AIMP_SDK_DIR}" ${CAIRO_INCLUDE_DIRS})
-  target_link_libraries(MockHost PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+  target_link_libraries(MockHost PRIVATE Threads::Threads ${CMAKE_DL_LIBS} ${CAIRO_LIBRARIES})
   set(AR_TEST_DIR "${CMAKE_BINARY_DIR}/testrun")
   file(MAKE_DIRECTORY "${AR_TEST_DIR}/bin")
   file(COPY tests/pw-metadata DESTINATION "${AR_TEST_DIR}/bin"

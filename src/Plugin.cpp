@@ -19,6 +19,30 @@ static Engine* g_engine = nullptr;
 static OptionsFrame* g_frame = nullptr;
 static bool g_updated = false;  // first start of a newer version than the last one (shown after loading)
 
+// Before 2.6.1 the settings file was always in %APPDATA%\AIMP (Linux: $XDG_CONFIG_HOME/AIMP), also for a
+// portable AIMP with its own profile folder. If the profile folder has no settings file yet, the old one is
+// copied there - not moved: an installed AIMP may still use it. A [Session] in it (the old version restarted
+// AIMP, e.g. for this update) is taken over with the copy, so it is removed from the old file.
+// Returns the old file if it was copied.
+static tstring TakeOverLegacySettings(const tstring& path) {
+    tstring legacyDir = LegacySettingsDir(false);
+    if (legacyDir.empty()) return tstring();
+    tstring legacy = legacyDir + AR_T(AR_SEP "PreventResampling.ini");
+    Ini current;
+    current.Open(path);
+    if (current.Existed()) return tstring();
+    Ini old;
+    old.Open(legacy);  // the same file as 'path' would exist already
+    if (!old.Existed() || !old.HasSection(Config::Section()) || !old.SaveAs(path)) return tstring();
+    Ini left;
+    left.Open(legacy);
+    if (left.Int(AR_T("Session"), AR_T("Saved"), 0)) {
+        left.Clear(AR_T("Session"));
+        left.Save();
+    }
+    return legacy;
+}
+
 // After an update AIMP restarts to load the new version - tell the user why, once per version
 static void ShowUpdatedNotice() {
     if (g_engine && !(g_frame && g_frame->IsOpen())) CurrentLanguage() = ResolveLanguage(g_engine->cfg.language);
@@ -128,9 +152,14 @@ public:
             Core() = nullptr;
             return E_FAIL;
         }
-        tstring settingsDir = SettingsDir();
-        if (settingsDir.empty()) settingsDir = dir;
-        else settingsDir += AR_T(AR_SEP);
+        // Settings next to AIMP.ini in AIMP's profile folder (the forum rules ask for it; a portable AIMP
+        // keeps them in its own folder). Without a profile folder: %APPDATA%\AIMP as before 2.6.1.
+        tstring settingsDir = dir;
+        if (settingsDir.empty()) {
+            settingsDir = LegacySettingsDir();
+            if (!settingsDir.empty()) settingsDir += AR_T(AR_SEP);
+        }
+        tstring takenOver = dir.empty() ? tstring() : TakeOverLegacySettings(settingsDir + AR_T("PreventResampling.ini"));
         Ini::Get().Open(settingsDir + AR_T("PreventResampling.ini"));
         if (!Ini::Get().Existed()) {
             // Settings of versions before 2.5 lived in AIMP's own configuration - remove them so a
@@ -155,7 +184,7 @@ public:
         }
         bool existed = Ini::Get().Existed();
         if (!existed) e->cfg.Save();  // new installation: write all defaults (plugin off)
-        // Version of the last start: newer now = an update (versions before 2.5.6 did not store it)
+        // Version of the last start: newer now = an update (versions before 2.6.0 did not store it)
         tstring lastRun = Ini::Get().Str(AR_T("Updates"), AR_T("RunVersion"));
         g_updated = existed && (lastRun.empty() || CompareVersions(ToUtf8(lastRun), AR_VERSION) < 0);
         if (lastRun != AR_T(AR_VERSION)) {
@@ -188,7 +217,8 @@ public:
             AR_T("Linux") +
 #endif
             AR_T(")"));
-        Log(AR_T("Settings: ") + Ini::Get().Path() + (Ini::Get().Existed() ? AR_T("") : AR_T(" (new)")));
+        Log(AR_T("Settings: ") + Ini::Get().Path() +
+            (!takenOver.empty() ? AR_T(" (taken over from ") + takenOver + AR_T(")") : Ini::Get().Existed() ? tstring() : tstring(AR_T(" (new)"))));
         if (g_updated)
             Log(AR_T("Updated from ") + (lastRun.empty() ? tstring(AR_T("an older version")) : lastRun) + AR_T(" to " AR_VERSION));
         if (!e->cfg.enabled)
@@ -214,6 +244,9 @@ public:
         if (frame_) Core()->UnregisterExtension(frame_.Get());
         g_frame = nullptr;
         frame_.Reset();
+#ifdef _WIN32
+        fx::ShutdownGdip();  // started by the picture on the About tab
+#endif
         g_engine = nullptr;
         e->onStatsChanged = nullptr;
         e->updater.Cancel();

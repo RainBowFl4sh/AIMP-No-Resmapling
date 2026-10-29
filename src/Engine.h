@@ -595,6 +595,37 @@ public:
         return tstring();
     }
 
+    // Internet radio and other streams (http://, https://, mms:// ...): never switched. Switching stops and
+    // restarts playback - for a live stream that means reconnecting, and with the restart option a whole
+    // AIMP restart on every station change. A local file has no scheme (Windows "C:\...", Linux "/..."),
+    // a file:// URL counts as local. AIMP's own check (IsURL) is asked as well.
+    static bool IsStream(const tstring& file) {
+        size_t colon = file.find(AR_T("://"));
+        if (colon != tstring::npos && colon >= 2) {
+            bool scheme = true;
+            for (size_t i = 0; i < colon; i++) {
+                TChar c = file[i];
+                scheme = scheme && ((c >= AR_T('a') && c <= AR_T('z')) || (c >= AR_T('A') && c <= AR_T('Z')) ||
+                                    (i > 0 && ((c >= AR_T('0') && c <= AR_T('9')) || c == AR_T('+') || c == AR_T('-') || c == AR_T('.'))));
+            }
+            if (scheme) return !EqualsI(file.substr(0, colon), AR_T("file"));
+        }
+        auto uri = Service<IAIMPServiceFileURI>(IID_IAIMPServiceFileURI);
+        auto s = MakeString(file);
+        return uri && s && uri->IsURL(s.Get()) == S_OK;
+    }
+
+    // "http://host:port/path?key" -> "http://host:port" (the log never shows paths or listening keys)
+    static tstring StreamHost(const tstring& url) {
+        size_t start = url.find(AR_T("://"));
+        if (start == tstring::npos) return tstring(AR_T("?"));
+        size_t end = url.find_first_of(AR_T("/?#"), start + 3);
+        tstring host = url.substr(0, end);
+        size_t at = host.find(AR_T('@'), start + 3);  // user:password@host
+        if (at != tstring::npos) host = host.substr(0, start + 3) + host.substr(at + 1);
+        return host;
+    }
+
     // Main thread: AIMP started a new stream
     void OnStreamStart() {
         if (player) ApplyPendingSeek(false);
@@ -620,6 +651,29 @@ public:
         if (Succeeded(info->GetValueAsObject(AIMP_FILEINFO_PROPID_FILENAME, IID_IAIMPString, s.OutV())) && s)
             j.file = FromString(s.Get());
         j.track.aimpOutput = AimpOutput();
+        if (IsStream(j.file)) {
+            bool same = j.file == handledFile_;  // e.g. playback paused and continued
+            handledFile_ = j.file;
+            restartFile_.clear();
+            ++gen_;  // a job for the track before is not switched any more
+            stats.Update([&](Stats& st) {
+                if (!same) {
+                    st.tracks++;
+                    st.skipped++;
+                }
+                st.trackRate = j.track.rate;
+                st.trackBits = j.track.bits;
+                st.trackChannels = j.track.channels;
+                st.trackCodec = j.track.codec;
+                st.aimpOutput = j.track.aimpOutput;
+                st.note = AR_T("internet stream - not switched");
+            });
+            if (!same)
+                Log(AR_T("Track ") + Khz(j.track.rate) + AR_T(" | internet stream (") + StreamHost(j.file) +
+                    AR_T(") - not switched"));
+            if (onStatsChanged) onStatsChanged();
+            return;
+        }
         handledFile_ = j.file;
         player->GetPlaylistItem(j.item.Out());
         j.cfg = cfg;

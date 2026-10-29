@@ -131,16 +131,22 @@ public:
         return cur > 0 ? (uint32_t)cur : 0;
     }
 
+    // While plugins load, AIMP has not opened its output yet: AIMP_PLAYER_PROPID_OUTPUT still names the
+    // default device ("Windows Default"), whatever is selected. The output AIMP will use is the one in its
+    // settings; the output really used is logged with every track ("AIMP output: ...").
     void LogDiagnostics(IAIMPServicePlayer* player) {
-        Ptr<IAIMPPropertyList> pl;
-        if (player && Succeeded(player->QueryInterface(IID_IAIMPPropertyList, pl.OutV())) && pl) {
+        tstring configured = ConfiguredAimpOutput();
+        if (!configured.empty()) {
+            Log(AR_T("AIMP output (from AIMP's settings): ") + configured);
+        } else {
+            Ptr<IAIMPPropertyList> pl;
             Ptr<IAIMPString> s;
-            if (Succeeded(pl->GetValueAsObject(AIMP_PLAYER_PROPID_OUTPUT, IID_IAIMPString, s.OutV())) && s) {
-                Log(AR_T("AIMP output at start-up: ") + FromString(s.Get()));
-            } else {
-                tstring configured = ConfiguredAimpOutput();
-                if (!configured.empty()) Log(AR_T("AIMP output (from AIMP's settings): ") + configured);
-            }
+            if (player && Succeeded(player->QueryInterface(IID_IAIMPPropertyList, pl.OutV())) && pl &&
+                Succeeded(pl->GetValueAsObject(AIMP_PLAYER_PROPID_OUTPUT, IID_IAIMPString, s.OutV())) && s)
+                Log(AR_T("AIMP output: not set in AIMP's settings (AIMP reports ") + FromString(s.Get()) +
+                    AR_T(" - the output of each track is logged with it)"));
+            else
+                Log(AR_T("AIMP output: not set in AIMP's settings (default device)"));
         }
         auto keys = FindAimpRateKeys(profileDir);
         if (keys.empty()) Log(AR_T("AIMP.ini: no output sample rate found (") + profileDir + AR_T("AIMP.ini)"));

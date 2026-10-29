@@ -1,6 +1,8 @@
-// The plugin's own settings file, next to the other AIMP plugin settings:
-//   Windows: %APPDATA%\AIMP\PreventResampling.ini
-//   Linux:   $XDG_CONFIG_HOME/AIMP/PreventResampling.ini (usually ~/.config/AIMP)
+// The plugin's own settings file, in AIMP's profile folder next to AIMP.ini:
+//   Windows: %APPDATA%\AIMP\PreventResampling.ini (portable AIMP: its own Profile folder)
+//   Linux:   ~/.config/AIMP/PreventResampling.ini
+// Versions before 2.6.1 always used %APPDATA%\AIMP (Linux: $XDG_CONFIG_HOME/AIMP), also for a portable
+// AIMP - such a file is taken over once (Plugin.cpp).
 // UTF-8 text, sections [PreventResampling], [Statistics] and [Updates]. Read and written on AIMP's
 // main thread; the update checker thread only calls Save() through the main thread as well.
 #pragma once
@@ -49,8 +51,9 @@ inline void MakeDir(const tstring& dir) {
 #endif
 }
 
-// Folder of the settings file (created if missing)
-inline tstring SettingsDir() {
+// Folder of the settings file before 2.6.1 (created if missing); now only the fallback if AIMP names no
+// profile folder, and where the settings of a portable AIMP are taken over from
+inline tstring LegacySettingsDir(bool create = true) {
 #ifdef _WIN32
     tstring base = EnvVar("APPDATA");
     if (base.empty()) return tstring();
@@ -61,11 +64,11 @@ inline tstring SettingsDir() {
         tstring home = EnvVar("HOME");
         if (home.empty()) return tstring();
         base = home + "/.config";
-        MakeDir(base);
+        if (create) MakeDir(base);
     }
     tstring dir = base + "/AIMP";
 #endif
-    MakeDir(dir);
+    if (create) MakeDir(dir);
     return dir;
 }
 
@@ -135,6 +138,12 @@ public:
     }
 
     bool HasSection(const tstring& section) { return Find(section, false) != nullptr; }
+
+    // Writes the same content to another file, which is this object's file from then on
+    bool SaveAs(const tstring& path) {
+        path_ = path;
+        return Save();
+    }
 
     bool Save() {
         if (path_.empty()) return false;

@@ -41,6 +41,8 @@ struct Config {
     bool bitPerfect = false;
     bool bpVolume100 = false;       // also AIMP's volume to 100 %
     bool bpNoGapless = false;       // also a short pause between tracks instead of gapless playback
+    // The mode only works while the plugin is enabled; a disabled plugin leaves AIMP as it was
+    bool BitPerfectOn() const { return enabled && bitPerfect; }
 
     tstring windowsDevice;          // part of the Windows device name; empty = automatic
     tstring extraDevices;           // more devices to switch, name parts separated by ';'

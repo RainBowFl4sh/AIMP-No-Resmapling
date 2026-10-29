@@ -107,6 +107,7 @@ static Str* MkStr(const std::string& v) { auto* s = new Str(); s->s = T(v); retu
 
 struct FileInfo : Obj<IAIMPFileInfo> {
     int rate = 44100;
+    std::string file;  // empty: a local file named after the rate
     FileInfo() { iids = {&IID_IAIMPFileInfo, &IID_IAIMPPropertyList}; }
     void BeginUpdate() override {}
     void EndUpdate() override {}
@@ -121,7 +122,7 @@ struct FileInfo : Obj<IAIMPFileInfo> {
     HRESULT GetValueAsInt64(INT32, INT64*) override { return E_FAIL; }
     HRESULT GetValueAsObject(INT32 id, CONSTIID, void** o) override {
         if (id == AIMP_FILEINFO_PROPID_CODEC) { *o = MkStr("FLAC"); return S_OK; }
-        if (id == AIMP_FILEINFO_PROPID_FILENAME) { *o = MkStr("/musik/track" + std::to_string(rate) + ".flac"); return S_OK; }
+        if (id == AIMP_FILEINFO_PROPID_FILENAME) { *o = MkStr(file.empty() ? "/musik/track" + std::to_string(rate) + ".flac" : file); return S_OK; }
         return E_FAIL;
     }
     HRESULT SetValueAsFloat(INT32, const DOUBLE) override { return E_NOTIMPL; }
@@ -312,6 +313,45 @@ struct MemStream : Obj<IAIMPMemoryStream> {
     void* GetData() override { return d.empty() ? nullptr : &d[0]; }
 };
 
+// Picture (the author's picture on the About tab): drawn as one colour derived from its bytes - grey-ish,
+// never the pink of the heart that "boop!" / "pat" show (from the Discord RP plugin's host test)
+static std::atomic<int> g_imageDraws{0};
+struct Image : Obj<IAIMPImage> {
+    uint32_t color = 0x808080;
+    Image() { iids = {&IID_IAIMPImage}; }
+    HRESULT LoadFromFile(IAIMPString*) override { return E_NOTIMPL; }
+    HRESULT LoadFromStream(IAIMPStream* s) override {
+        std::string b;
+        char buf[4096];
+        INT32 n;
+        while ((n = s->Read(buf, sizeof buf)) > 0) b.append(buf, (size_t)n);
+        if (b.size() < 8 || memcmp(b.data(), "\x89PNG", 4) != 0) return E_FAIL;
+        uint32_t h = 2166136261u;
+        for (unsigned char c : b) h = (h ^ c) * 16777619u;
+        color = (h & 0x7f7f7f) | 0x404040;
+        return S_OK;
+    }
+    HRESULT SaveToFile(IAIMPString*, INT32) override { return E_NOTIMPL; }
+    HRESULT SaveToStream(IAIMPStream*, INT32) override { return E_NOTIMPL; }
+    INT32 GetFormatID() override { return AIMP_IMAGE_FORMAT_PNG; }
+    HRESULT GetSize(SIZE* size) override { size->cx = size->cy = 128; return S_OK; }
+    HRESULT Clone(IAIMPImage**) override { return E_NOTIMPL; }
+    HRESULT Draw(HCANVAS canvas, RECT r, DWORD, IUnknown*) override {
+        ++g_imageDraws;
+#ifdef _WIN32
+        HBRUSH b = CreateSolidBrush(RGB((color >> 16) & 255, (color >> 8) & 255, color & 255));
+        FillRect(canvas, &r, b);
+        DeleteObject(b);
+#else
+        cairo_rectangle(canvas, r.left, r.top, r.right - r.left, r.bottom - r.top);
+        cairo_set_source_rgb(canvas, ((color >> 16) & 255) / 255.0, ((color >> 8) & 255) / 255.0, (color & 255) / 255.0);
+        cairo_fill(canvas);
+#endif
+        return S_OK;
+    }
+    HRESULT Resize(INT32, INT32) override { return S_OK; }
+};
+
 // HTTP client: answers from a URL -> content map; completion is reported on the main thread
 struct HttpSvc : Obj<IAIMPServiceHTTPClient> {
     std::map<std::string, std::string> pages;
@@ -384,6 +424,7 @@ struct CoreImpl : Obj<IAIMPCore> {
     HRESULT CreateObject(CONSTIID iid, void** o) override {
         if (EqualGUID(iid, IID_IAIMPString)) { *o = new Str(); return S_OK; }
         if (EqualGUID(iid, IID_IAIMPMemoryStream)) { *o = static_cast<IAIMPMemoryStream*>(new MemStream()); return S_OK; }
+        if (EqualGUID(iid, IID_IAIMPImage)) { *o = static_cast<IAIMPImage*>(new Image()); return S_OK; }
         return E_NOTIMPL;
     }
     HRESULT GetPath(int, IAIMPString** v) override { *v = MkStr(profile); return S_OK; }
@@ -411,7 +452,7 @@ static std::string ReadFile(const std::string& p) {
     return r;
 }
 
-// The plugin's settings file: <dir>/AIMP/PreventResampling.ini (APPDATA / XDG_CONFIG_HOME = <dir>)
+// The plugin's settings file: in AIMP's profile folder <dir> (before 2.6.1: <dir>/AIMP, APPDATA / XDG_CONFIG_HOME = <dir>)
 static std::string g_ini;
 static std::string IniGet(const std::string& section, const std::string& key) {
     std::string data = ReadFile(g_ini), cur;
@@ -459,6 +500,10 @@ static void IniSet(const std::string& key, const std::string& value) { IniSetIn(
 static bool WaitUntil(std::function<bool()> cond, int ms = 3000) {
     for (int i = 0; i < ms / 5; i++) {
         g_main.Pump();
+#ifdef _WIN32
+        MSG msg;  // thread timers (the animation on the About tab) need a message loop, like in AIMP
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
+#endif
         if (cond()) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -592,6 +637,33 @@ static void WriteFile(const std::string& p, const std::string& data) {
     fclose(f);
 }
 
+// Output tab: the bit-perfect mode only works while the plugin is enabled - greyed out (with a note)
+// while "Enable Prevent Resampling" is not ticked, usable again as soon as it is
+static void BitPerfectNeedsPlugin() {
+    auto enable = FindControl("Check", "Enable Prevent Resampling");
+    auto bp = FindControl("Check", "Bit-perfect mode (switch off AIMP's sound processing)");
+    auto volume = FindControl("Check", "Set AIMP's volume to 100 %");
+    auto gapless = FindControl("Check", "No gapless playback (short pause between tracks)");
+    CHECK(enable.self && bp.self && volume.self && gapless.self);
+    if (!enable.self || !bp.self || !volume.self || !gapless.self) return;
+    const char* note = "Only works while Prevent Resampling is enabled (General tab).";
+    auto enabled = [](mockui::Registry::Info& i) {
+        return !(i.ints->count(AIMPUI_CONTROL_PROPID_ENABLED) && i.ints->at(AIMPUI_CONTROL_PROPID_ENABLED) == 0);
+    };
+    auto tick = [](mockui::Registry::Info& i, bool on) {
+        (*i.ints)[AIMPUI_CHECKBOX_PROPID_STATE] = on ? AIMPUI_CHECKSTATE_CHECKED : AIMPUI_CHECKSTATE_UNCHECKED;
+        i.fire();
+    };
+    CHECK(!enabled(bp) && !enabled(volume) && !enabled(gapless));  // fresh installation: plugin off
+    CHECK(FindControl("Label", note).self != nullptr);
+    tick(enable, true);
+    CHECK(enabled(bp) && enabled(volume) && enabled(gapless));
+    CHECK(FindControl("Label", note).self == nullptr);
+    tick(enable, false);
+    CHECK(!enabled(bp) && !enabled(volume) && !enabled(gapless));
+    CHECK(FindControl("Label", note).self != nullptr);
+}
+
 // Advanced tab: language list (switches the page at once, every language fits the layout and has all
 // texts translated), automatic language from AIMP, export and import of the settings file
 static void LanguageAndSettingsFile(const std::string& dir) {
@@ -677,9 +749,185 @@ static void LanguageAndSettingsFile(const std::string& dir) {
     CHECK(ReadFile(dir + "/PreventResampling.log").find("Missing translation") == std::string::npos);
 }
 
+// A paint box of the settings page drawn into pixels (0xRRGGBB, row by row) at 'scale' x its size
+static bool RenderPaint(const mockui::Registry::Info& paint, int scale, std::vector<uint32_t>& pixels) {
+    const int w = (paint.bounds.right - paint.bounds.left) * scale, h = (paint.bounds.bottom - paint.bounds.top) * scale;
+    RECT r = {0, 0, w, h};
+    pixels.clear();
+#ifdef _WIN32
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;  // top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    void* bits = nullptr;
+    HDC dc = CreateCompatibleDC(nullptr);
+    HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = SelectObject(dc, bmp);
+    HBRUSH bg = CreateSolidBrush(RGB(240, 240, 240));  // the skin's background
+    FillRect(dc, &r, bg);
+    DeleteObject(bg);
+    bool ok = paint.paint(dc, r);
+    GdiFlush();
+    for (int i = 0; i < w * h; ++i) pixels.push_back(static_cast<uint32_t*>(bits)[i] & 0xffffff);
+    SelectObject(dc, old);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+#else
+    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_RGB24, w, h);
+    cairo_t* cr = cairo_create(surface);
+    cairo_set_source_rgb(cr, 0.94, 0.94, 0.94);  // the skin's background
+    cairo_paint(cr);
+    bool ok = paint.paint(cr, r);
+    cairo_destroy(cr);
+    cairo_surface_flush(surface);
+    const unsigned char* data = cairo_image_surface_get_data(surface);
+    const int stride = cairo_image_surface_get_stride(surface);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) pixels.push_back(reinterpret_cast<const uint32_t*>(data + y * stride)[x] & 0xffffff);
+    cairo_surface_destroy(surface);
+#endif
+    return ok;
+}
+
+// About tab: the author's picture (64 x 64, rounded corners), a quiet donation link at the right edge, and
+// as in the Discord RP plugin a click on the head or the nose shows "pat" / "boop!" (white,
+// with a pink heart) for about a second; clicks anywhere else, or from one area into the other, show nothing
+static void AboutTab() {
+    auto donate = FindControl("Label", "Support this plugin");
+    CHECK(donate.self != nullptr);
+    if (donate.self) {
+        CHECK(N(donate.strs->count(AIMPUI_LABEL_PROPID_URL) ? donate.strs->at(AIMPUI_LABEL_PROPID_URL) : tstr()) ==
+              "https://www.paypal.com/donate/?hosted_button_id=TNTR6BR72JZ6E");
+        CHECK(donate.ints->count(AIMPUI_LABEL_PROPID_TEXTALIGN) && donate.ints->at(AIMPUI_LABEL_PROPID_TEXTALIGN) == AIMPUI_ALIGN_FAR);
+    }
+    mockui::Registry::Info av{};
+    av.self = nullptr;
+    for (auto& f : g_ui.reg.all) {
+        auto i = f();
+        if (N(i.kind) == "Paint") av = i;
+    }
+    CHECK(av.self != nullptr);
+    if (!av.self) return;
+    CHECK(av.bounds.left == 10 && av.bounds.top == 8 && av.bounds.right == 74 && av.bounds.bottom == 72);
+    auto find = [&]() {  // the current state of the paint box (invalidated counts the redraws)
+        for (auto& f : g_ui.reg.all) {
+            auto i = f();
+            if (i.self == av.self) return i;
+        }
+        return av;
+    };
+    std::vector<uint32_t> px;
+    int draws = g_imageDraws;
+    CHECK(RenderPaint(av, 2, px) && g_imageDraws > draws);  // the picture is drawn
+    auto hearts = [&]() {  // pixels in the heart's pink (the test picture is grey-ish, never pink)
+        if (!RenderPaint(av, 2, px)) return -1;
+        int n = 0;
+        for (uint32_t p : px) {
+            const int r = (p >> 16) & 255, g = (p >> 8) & 255, b = p & 255;
+            if (r > 200 && g < 150 && b > 100 && b < 210) ++n;
+        }
+        return n;
+    };
+    const float w = 64, h = 64;
+    auto click = [&](float x1, float y1, float x2, float y2) {  // down at (x1, y1), up at (x2, y2): parts of the picture
+        av.mouse(0, (int)(x1 * w), (int)(y1 * h));
+        av.mouse(1, (int)(x1 * w), (int)(y1 * h));
+        av.mouse(0, (int)(x2 * w), (int)(y2 * h));
+        av.mouse(2, (int)(x2 * w), (int)(y2 * h));
+        av.mouse(3, -1, -1);
+    };
+    CHECK(hearts() == 0);  // nothing without a click
+    const float misses[][4] = {{0.05f, 0.05f, 0.05f, 0.05f}, {0.5f, 0.4f, 0.5f, 0.4f},      // corner, eyes (between)
+                               {0.2f, 0.2f, 0.2f, 0.2f},     {0.76f, 0.2f, 0.76f, 0.2f},    // left / right of the head
+                               {0.5f, 0.05f, 0.5f, 0.05f},   {0.28f, 0.64f, 0.28f, 0.64f},  // above, left of the nose
+                               {0.5f, 0.77f, 0.5f, 0.77f},   {0.9f, 0.9f, 0.9f, 0.9f},      // under the nose, corner
+                               {0.48f, 0.64f, 0.48f, 0.2f},  {0.48f, 0.2f, 0.48f, 0.64f}};  // nose -> head, head -> nose
+    for (const auto& m : misses) {
+        int before = find().invalidated;
+        click(m[0], m[1], m[2], m[3]);
+        if (find().invalidated != before || hearts() != 0) {
+            printf("about: word on the picture after a click at %.2f, %.2f -> %.2f, %.2f\n", m[0], m[1], m[2], m[3]);
+            g_failures++;
+        }
+    }
+    const float hits[][2] = {{0.48f, 0.2f}, {0.48f, 0.64f}, {0.4f, 0.47f}};  // head, nose, just above the nose
+    for (const auto& spot : hits) {
+        int before = find().invalidated;
+        click(spot[0], spot[1], spot[0], spot[1]);
+        int shown = hearts();
+        WaitUntil([] { return false; }, 1500);
+        int frames = find().invalidated - before;
+        int after = hearts();
+        int idle = find().invalidated;
+        WaitUntil([] { return false; }, 700);
+        printf("about: picture click at %.2f, %.2f: %d heart pixels, %d frames\n", spot[0], spot[1], shown, frames);
+        CHECK(shown >= 20);                          // word and heart on the picture
+        CHECK(frames >= 8);                          // it moves
+        CHECK(after == 0);                           // and is gone after its animation
+        CHECK(find().invalidated - idle <= 1);       // the timer stopped
+    }
+}
+
 static void StartTrack(CoreImpl* core, int rate) {
     core->player->info->rate = rate;
     core->disp->hook->CoreMessage(AIMP_MSG_EVENT_STREAM_START, 0, nullptr, nullptr);
+}
+
+// Internet radio: a URL is never switched (no stop, no restart); the log names only the host, never the
+// path, a listening key or a password. Pausing and continuing does not log it again.
+static void StreamNotSwitched(CoreImpl* core, const std::string& dir) {
+    int stops = core->player->stops, plays = core->player->plays;
+    size_t pw = ReadFile(dir + "/pw.log").size();
+    core->player->info->file = "https://user:secret@radio.example.com:8443/live/stream.mp3?listenkey=0123abcd";
+    StartTrack(core, 96000);
+    const char* line = "Track 96 kHz | internet stream (https://radio.example.com:8443) - not switched";
+    CHECK(WaitUntil([&] { return ReadFile(dir + "/PreventResampling.log").find(line) != std::string::npos; }));
+    core->disp->hook->CoreMessage(AIMP_MSG_EVENT_PLAYER_STATE, AIMP_PLAYER_STATE_PAUSED, nullptr, nullptr);
+    core->disp->hook->CoreMessage(AIMP_MSG_EVENT_PLAYER_STATE, AIMP_PLAYER_STATE_PLAYING, nullptr, nullptr);
+    WaitUntil([] { return false; }, 400);
+    std::string log = ReadFile(dir + "/PreventResampling.log");
+    CHECK(log.find(line) == log.rfind(line));
+    CHECK(log.find("secret") == std::string::npos && log.find("listenkey") == std::string::npos);
+    CHECK(core->player->stops == stops && core->player->plays == plays && ReadFile(dir + "/pw.log").size() == pw);
+    core->player->info->file.clear();
+}
+
+// Portable AIMP (and every AIMP before 2.6.1): the settings were in %APPDATA%\AIMP (Linux: XDG_CONFIG_HOME/AIMP),
+// not in AIMP's profile folder. A profile folder without a settings file takes the old file over once (copied,
+// with its [Session], which is removed from the old file); afterwards the profile folder's own file is used.
+static void SettingsTakeOver(CoreImpl* core, TAIMPPluginGetHeaderProc getHeader, const std::string& dir) {
+    std::string portable = dir + "/portable/", legacy = dir + "/AIMP/PreventResampling.ini";
+#ifdef _WIN32
+    CreateDirectoryA(portable.c_str(), nullptr);
+    CreateDirectoryA((dir + "/AIMP").c_str(), nullptr);
+#else
+    mkdir(portable.c_str(), 0755);
+    mkdir((dir + "/AIMP").c_str(), 0755);
+#endif
+    remove((portable + "PreventResampling.ini").c_str());
+    remove((portable + "PreventResampling.log").c_str());
+    WriteFile(legacy, "[PreventResampling]\r\nEnabled=1\r\nLanguage=de\r\n\r\n[Session]\r\nSaved=1234\r\n\r\n"
+                      "[Updates]\r\nRunVersion=2.6.0\r\n");
+    std::string profile = core->profile;
+    core->profile = portable;
+    for (int run = 0; run < 2; run++) {
+        IAIMPPlugin* plugin = nullptr;
+        getHeader(&plugin);
+        CHECK(Succeeded(plugin->Initialize(core)));
+        CHECK(Succeeded(plugin->Finalize()));
+        plugin->Release();
+        if (run == 0) WriteFile(legacy, ReadFile(legacy) + "; changed after the takeover\r\n");
+    }
+    std::string now = ReadFile(portable + "PreventResampling.ini"), old = ReadFile(legacy), log = ReadFile(portable + "PreventResampling.log");
+    CHECK(now.find("Language=de") != std::string::npos && now.find("Enabled=1") != std::string::npos);
+    CHECK(now.find("Saved=1234") != std::string::npos);  // the session moves along (taken over with the first track)
+    CHECK(old.find("Language=de") != std::string::npos && old.find("Saved=1234") == std::string::npos);
+    size_t taken = log.find("(taken over from ");
+    CHECK(taken != std::string::npos && log.find("(taken over from ", taken + 1) == std::string::npos);  // once
+    CHECK(log.find("Updated from 2.6.0 to") != std::string::npos);  // the update notice still works
+    core->profile = profile;
 }
 
 int main(int argc, char** argv) {
@@ -694,7 +942,8 @@ int main(int argc, char** argv) {
     remove((dir + "/PreventResampling.log").c_str());
     remove((dir + "/AIMP.ini").c_str());
     remove((dir + "/PreventResampling.resume").c_str());
-    g_ini = dir + "/AIMP/PreventResampling.ini";
+    g_ini = dir + "/PreventResampling.ini";
+    remove((dir + "/AIMP/PreventResampling.ini").c_str());
     remove(g_ini.c_str());
 #ifdef _WIN32
     SetEnvironmentVariableA("APPDATA", dir.c_str());
@@ -738,6 +987,7 @@ int main(int argc, char** argv) {
         if (name) name->Release();
         CHECK(frame->CreateFrame((HWND)0) != (HWND)0);
         CheckLayout(dir + "/layout.txt");
+        BitPerfectNeedsPlugin();
         {
             // About tab: the changelog lists the installed version first and ends with the versions
             // before 2.0 (res/changelog-history.md)
@@ -762,6 +1012,7 @@ int main(int argc, char** argv) {
             if (longest > 76) printf("changelog: longest line %d characters\n", (int)longest);
             CHECK(longest <= 76);
         }
+        AboutTab();
         LanguageAndSettingsFile(dir);
         frame->DestroyFrame();
         frame->Release();
@@ -781,6 +1032,11 @@ int main(int argc, char** argv) {
     CHECK(ReadFile(pwLog).empty());
     CHECK(ReadFile(dir + "/PreventResampling.log").find("Plugin is disabled") != std::string::npos);
     CHECK(core->player->stops == 0 && core->shutdown->calls == 0);
+    // AIMP's output at start-up comes from its settings (AIMP has not opened the output yet); not set here
+    CHECK(ReadFile(dir + "/PreventResampling.log").find("AIMP output: not set in AIMP's settings (AIMP reports ") != std::string::npos);
+    CHECK(ReadFile(dir + "/PreventResampling.log").find("AIMP output at start-up") == std::string::npos);
+    // the settings file is in AIMP's profile folder, nothing in the old place (APPDATA / XDG_CONFIG_HOME)
+    CHECK(ReadFile(dir + "/AIMP/PreventResampling.ini").empty());
 
     IniSet("Enabled", "1");
     plugin = nullptr;
@@ -793,10 +1049,11 @@ int main(int argc, char** argv) {
         StartTrack(core, r);
         WaitUntil([] { return false; }, 300);
     }
+    StreamNotSwitched(core, dir);
     CHECK(Succeeded(plugin->Finalize()));
     CHECK(core->disp->hook == nullptr);
     CHECK(core->frame == nullptr);
-    CHECK(IniGet("Statistics", "Tracks") == "3");
+    CHECK(IniGet("Statistics", "Tracks") == "4");
     plugin->Release();
     {
         std::string log = ReadFile(dir + "/PreventResampling.log");
@@ -813,7 +1070,7 @@ int main(int argc, char** argv) {
     StartTrack(core, 88200);
     WaitUntil([] { return false; }, 300);
     CHECK(Succeeded(plugin->Finalize()));
-    CHECK(IniGet("Statistics", "Tracks") == "4");
+    CHECK(IniGet("Statistics", "Tracks") == "5");
     plugin->Release();
     CHECK(core->player->stops == core->player->plays);
 
@@ -905,6 +1162,7 @@ int main(int argc, char** argv) {
     CHECK(Succeeded(plugin->Finalize()));
     plugin->Release();
     CHECK(IniGet("Session", "Saved") == "");
+    SettingsTakeOver(core, getHeader, dir);
     g_ui.reg.Clear();  // before unloading: the controls hold the plugin's event handlers
     FreeLibrary(lib);
 #else
@@ -962,13 +1220,15 @@ int main(int argc, char** argv) {
     StartTrack(core, 96000);
     WaitUntil([] { return false; }, 400);
     CHECK(core->player->stops == 0 && core->shutdown->calls == 0);
+    // 7) internet radio: never switched
+    StreamNotSwitched(core, dir);
 
     // Finalize: force-rate is reset, statistics are saved
     CHECK(Succeeded(plugin->Finalize()));
     CHECK(ReadFile(pwLog).find("clock.force-rate 0") != std::string::npos);
     CHECK(core->disp->hook == nullptr);
     CHECK(core->frame == nullptr);
-    CHECK(IniGet("Statistics", "Tracks") == "9");
+    CHECK(IniGet("Statistics", "Tracks") == "10");
     CHECK(IniGet("Statistics", "Rates").find("96000=5") != std::string::npos);
     plugin->Release();
 
@@ -984,7 +1244,8 @@ int main(int argc, char** argv) {
         fprintf(rf, "/music/resume.flac\n12500\n96000\n%lld\n", (long long)time(nullptr));
         fclose(rf);
     }
-    // ... and an update is found on start-up: downloaded, SHA-256 checked, opened in AIMP
+    // ... and an update is found on start-up: downloaded, SHA-256 checked, opened in AIMP. The repository
+    // still has its old name here: the new name is not found, the release comes from the old one
     const std::string pkg = "PK-fake-aimppack-content";
     const std::string pkgUrl = "https://github.com/RainBowFl4sh/AIMP-No-Resmapling/releases/download/v9.9.9/PreventResampling-9.9.9.aimppack";
     core->http->pages["https://api.github.com/repos/RainBowFl4sh/AIMP-No-Resmapling/releases/latest"] =
@@ -1000,11 +1261,12 @@ int main(int argc, char** argv) {
     getHeader(&plugin);
     CHECK(Succeeded(plugin->Initialize(core)));
     core->disp->hook->CoreMessage(AIMP_MSG_EVENT_LOADED, 0, nullptr, nullptr);
-    CHECK(WaitUntil([&] { return ReadFile(dir + "/AIMP/PreventResampling-9.9.9.aimppack") == pkg; }));
+    CHECK(WaitUntil([&] { return ReadFile(dir + "/PreventResampling-9.9.9.aimppack") == pkg; }));
     CHECK(WaitUntil([&] { return ReadFile(dir + "/PreventResampling.log").find("SHA-256 OK") != std::string::npos; }));
     CHECK(IniGet("Updates", "AutoOpened") == "9.9.9" && IniGet("Updates", "LatestVersion") == "9.9.9");
     CHECK(IniGet("Updates", "LastCheckFailed") == "0");
-    CHECK(core->http->requested.size() == 2);
+    CHECK(core->http->requested.size() == 3);
+    CHECK(core->http->requested[0] == "https://api.github.com/repos/RainBowFl4sh/AIMP-No-Resampling/releases/latest");
     // AIMP installs the package (the plugin file on disk changes) -> the plugin restarts AIMP to load it
     // and writes the resume file for the track that is playing
     {
@@ -1043,7 +1305,7 @@ int main(int argc, char** argv) {
     WaitUntil([] { return false; }, 400);
     CHECK(count("clock.force-rate 176400") == before176 + 1);
     CHECK(Succeeded(plugin->Finalize()));
-    CHECK(IniGet("Statistics", "Tracks") == "12");
+    CHECK(IniGet("Statistics", "Tracks") == "13");
     plugin->Release();
 
     // Start after an update (the last start was an older version): the user is told once, after loading
@@ -1078,7 +1340,7 @@ int main(int argc, char** argv) {
             WaitUntil([] { return false; }, 300);
             CHECK(core->http->requested.size() == requests);
         } else {
-            CHECK(WaitUntil([&] { return core->http->requested.size() == requests + 1 && IniGet("Updates", "LastCheckFailed") == "1"; }));
+            CHECK(WaitUntil([&] { return core->http->requested.size() == requests + 2 && IniGet("Updates", "LastCheckFailed") == "1"; }));  // new and old name
         }
         CHECK(Succeeded(plugin->Finalize()));
         plugin->Release();
@@ -1088,10 +1350,10 @@ int main(int argc, char** argv) {
 
     // A release whose package is not in this repository's releases, or whose name is not a plain file
     // name, is shown but never downloaded
-    core->http->pages["https://api.github.com/repos/RainBowFl4sh/AIMP-No-Resmapling/releases/latest"] =
+    core->http->pages["https://api.github.com/repos/RainBowFl4sh/AIMP-No-Resampling/releases/latest"] =
         "{\"tag_name\": \"v9.9.10\", \"body\": \"\", \"assets\": ["
         "{\"name\": \"PreventResampling-9.9.10.aimppack\", \"browser_download_url\": \"https://example.invalid/pkg\", \"digest\": \"sha256:" + ar::Sha256::Of(pkg) + "\"},"
-        "{\"name\": \"..\\\\x.aimppack\", \"browser_download_url\": \"https://github.com/RainBowFl4sh/AIMP-No-Resmapling/releases/download/v9.9.10/x.aimppack\", \"digest\": \"sha256:" + ar::Sha256::Of(pkg) + "\"}]}";
+        "{\"name\": \"..\\\\x.aimppack\", \"browser_download_url\": \"https://github.com/RainBowFl4sh/AIMP-No-Resampling/releases/download/v9.9.10/x.aimppack\", \"digest\": \"sha256:" + ar::Sha256::Of(pkg) + "\"}]}";
     IniSet("UpdateInterval", "0");
     {
         size_t requests = core->http->requested.size();
@@ -1101,12 +1363,13 @@ int main(int argc, char** argv) {
         core->disp->hook->CoreMessage(AIMP_MSG_EVENT_LOADED, 0, nullptr, nullptr);
         CHECK(WaitUntil([&] { return IniGet("Updates", "LatestVersion") == "9.9.10"; }));
         WaitUntil([] { return false; }, 300);
-        CHECK(core->http->requested.size() == requests + 1);  // only the release information
+        CHECK(core->http->requested.size() == requests + 1);  // only the release information (found under the new name)
         CHECK(IniGet("Updates", "AutoOpened") == "9.9.9");
         CHECK(Succeeded(plugin->Finalize()));
         plugin->Release();
     }
 
+    SettingsTakeOver(core, getHeader, dir);
     g_ui.reg.Clear();
     dlclose(lib);
 #endif

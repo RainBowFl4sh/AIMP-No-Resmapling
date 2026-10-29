@@ -5,7 +5,7 @@
 #   ./build.sh all        additionally the Windows DLLs (32/64 bit) via MinGW-w64
 #   ./build.sh install    install the Linux plugin to ~/.local/share/AIMP/Plugins (override with AIMP_PLUGINS)
 #
-# Requires: cmake, g++, pkg-config, libcairo2-dev (headers only), git
+# Requires: cmake, g++, pkg-config, libcairo2-dev, git
 #           for "all" also: mingw-w64
 # Result:   dist/PreventResampling/{PreventResampling.dll, x64/PreventResampling.dll, x64/PreventResampling.so}
 set -e

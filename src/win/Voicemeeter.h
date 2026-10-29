@@ -30,6 +30,7 @@ class Voicemeeter {
     typedef long(__stdcall* T_DevDescW)(long, long*, unsigned short*, unsigned short*);
 
     std::recursive_mutex m_;
+    float asioSrOriginal_ = -1;  // Option.ASIOsr before the plugin set it (-1 = not changed in this session)
     HMODULE h_ = nullptr;
     bool tried_ = false, loggedIn_ = false;
     int64_t lastLogin_ = 0;
@@ -242,6 +243,44 @@ public:
     }
 
     bool Restart() { return SetFloat("Command.Restart", 1.0f); }
+
+    // "ASIO device on A1 follows the engine rate": Option.ASIOsr = 1. The value Voicemeeter had before is
+    // remembered (once per session) so that RestoreAsioRate can give it back when AIMP closes.
+    bool FollowEngineRateOnAsio() {
+        std::lock_guard<std::recursive_mutex> g(m_);
+        float v = -1;
+        if (!GetFloat("Option.ASIOsr", v)) v = -1;
+        if (v == 1.0f) return true;  // already set (by the user or earlier by the plugin)
+        if (!SetFloat("Option.ASIOsr", 1.0f)) return false;
+        if (asioSrOriginal_ < 0 && v >= 0) {
+            asioSrOriginal_ = v;
+            Log(L"Voicemeeter: Option.ASIOsr " + Num((long long)v) + L" -> 1 (restored when AIMP closes)");
+        }
+        return true;
+    }
+    float AsioRateOriginal() {
+        std::lock_guard<std::recursive_mutex> g(m_);
+        return asioSrOriginal_;
+    }
+    // Session across a restart by the plugin: the next AIMP process restores the value (keeps an older one)
+    void SetAsioRateOriginal(float v) {
+        std::lock_guard<std::recursive_mutex> g(m_);
+        if (asioSrOriginal_ < 0) asioSrOriginal_ = v;
+    }
+    void ForgetAsioRate() {
+        std::lock_guard<std::recursive_mutex> g(m_);
+        asioSrOriginal_ = -1;
+    }
+    // Sets Option.ASIOsr back to the value before the plugin changed it; true = changed (engine restart needed)
+    bool RestoreAsioRate() {
+        std::lock_guard<std::recursive_mutex> g(m_);
+        if (asioSrOriginal_ < 0) return false;
+        float v = asioSrOriginal_;
+        asioSrOriginal_ = -1;
+        bool ok = SetFloat("Option.ASIOsr", v);
+        Log(L"Voicemeeter: Option.ASIOsr back to " + Num((long long)v) + (ok ? L"" : L" (failed)"));
+        return ok;
+    }
 
     // Waits until the engine runs with the requested rate after a restart (polls quickly)
     bool WaitForEngine(uint32_t hz, int firstPollMs, int timeoutMs) {

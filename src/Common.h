@@ -37,7 +37,7 @@
 #define AR_PLUGIN_NAME "Prevent Resampling"
 #define AR_AUTHOR "Fl4sh"
 #ifndef AR_VERSION
-#define AR_VERSION "2.6.0"
+#define AR_VERSION "2.6.1"
 #endif
 
 namespace ar {

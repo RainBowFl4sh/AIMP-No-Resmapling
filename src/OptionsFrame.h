@@ -1,6 +1,7 @@
 // Native settings page in AIMP (Preferences -> Plugins -> Prevent Resampling), built with AIMP's
 // GUI API so it follows the skin and works on Windows and Linux.
 #pragma once
+#include "AvatarFx.h"
 #include "AvatarPng.h"
 #include "ChangelogText.h"
 #include "Engine.h"
@@ -49,6 +50,54 @@ public:
     void WINAPI OnChanged(IUnknown* sender) override { if (fn_) fn_(sender); }
 };
 
+// IAIMPUIDrawEvents as AIMP calls it. On Windows AIMP passes the rectangle of OnDraw by reference (Delphi
+// "const R: TRect"; by value only in AIMP for Linux, built with Lazarus). The SDK header declares it by value,
+// which breaks 32-bit AIMP (wrong rectangle, unbalanced stack) - same vtable, AIMP's convention.
+class AimpDrawEvents : public IUnknown {
+public:
+#ifdef _WIN32
+    virtual void WINAPI OnDraw(IUnknown* sender, HCANVAS canvas, const RECT& r) = 0;
+#else
+    virtual void WINAPI OnDraw(IUnknown* sender, HCANVAS canvas, const RECT r) = 0;
+#endif
+};
+
+// Drawing and mouse events of a paint box (the author's picture on the About tab)
+class PaintEvents final : public AimpDrawEvents, public IAIMPUIMouseEvents {
+    std::atomic<long> refs_{0};
+
+public:
+    std::function<void(HCANVAS, const RECT&)> draw;
+    std::function<void(int, int, int)> mouse;  // 0 = move, 1 = left button down, 2 = up, 3 = mouse left the box
+
+    HRESULT __unknwncall QueryInterface(REFIID riid, LPVOID* ppv) override {
+        if (!ppv) return E_POINTER;
+        if (EqualGUID(riid, IID_IUnknown) || EqualGUID(riid, IID_IAIMPUIDrawEvents)) *ppv = static_cast<AimpDrawEvents*>(this);
+        else if (EqualGUID(riid, IID_IAIMPUIMouseEvents)) *ppv = static_cast<IAIMPUIMouseEvents*>(this);
+        else { *ppv = nullptr; return E_NOINTERFACE; }
+        AddRef();
+        return S_OK;
+    }
+    DWORD __unknwncall AddRef() override { return (DWORD)++refs_; }
+    DWORD __unknwncall Release() override {
+        long r = --refs_;
+        if (r == 0) delete this;
+        return (DWORD)r;
+    }
+#ifdef _WIN32
+    void WINAPI OnDraw(IUnknown*, HCANVAS canvas, const RECT& r) override { if (draw) draw(canvas, r); }
+#else
+    void WINAPI OnDraw(IUnknown*, HCANVAS canvas, const RECT r) override { if (draw) draw(canvas, r); }
+#endif
+    void WINAPI OnMouseDoubleClick(IUnknown*, TAIMPUIMouseButton b, INT32 x, INT32 y, WORD) override {
+        if (mouse && b == umbLeft) mouse(1, x, y);  // a quick second click counts as a click again
+    }
+    void WINAPI OnMouseDown(IUnknown*, TAIMPUIMouseButton b, INT32 x, INT32 y, WORD) override { if (mouse && b == umbLeft) mouse(1, x, y); }
+    void WINAPI OnMouseLeave(IUnknown*) override { if (mouse) mouse(3, -1, -1); }
+    void WINAPI OnMouseMove(IUnknown*, INT32 x, INT32 y, WORD) override { if (mouse) mouse(0, x, y); }
+    void WINAPI OnMouseUp(IUnknown*, TAIMPUIMouseButton b, INT32 x, INT32 y, WORD) override { if (mouse && b == umbLeft) mouse(2, x, y); }
+};
+
 class OptionsFrame : public ComObject<IAIMPOptionsDialogFrame> {
     Engine* engine_;
     Ptr<IAIMPServiceUI> ui_;
@@ -65,6 +114,7 @@ class OptionsFrame : public ComObject<IAIMPOptionsDialogFrame> {
     Ptr<IAIMPUICheckBox> cbBp_, cbBpVolume_, cbBpGapless_;  // Output tab: bit-perfect mode
     Ptr<IAIMPUILabel> lbBpStatus_;
     Ptr<IAIMPUIButton> btBpRestart_;
+    Ptr<IAIMPUILabel> lbBpInfo_;
     Ptr<IAIMPUICheckBox> cbVm_, cbVmEngine_, cbVmAllBuses_, cbVmAsio_;
     Ptr<IAIMPUISpinEdit> spSettle_;
     Ptr<IAIMPUIComboBox> coAimpOut_, coMode_, coWinDev_, coAsio_, coVmA1_;
@@ -83,6 +133,20 @@ class OptionsFrame : public ComObject<IAIMPOptionsDialogFrame> {
     Ptr<IAIMPUILabel> lbUpdate_, lnNotes_;
     Ptr<IAIMPUIMemo> memoChangelog_;
     tstring lastChangelog_;
+    // About tab: the author's picture, "pat" / "boop!" on a click (AvatarFx.h)
+    Ptr<IAIMPUIPaintBox> pbAvatar_;
+    Ptr<IAIMPImage> avatar_;
+    PaintEvents* avatarEvents_ = nullptr;
+    int fxSpot_ = -1, fxPressed_ = -1;  // area of the running animation / of the pressed mouse button
+    int64_t fxStart_ = 0;
+#ifdef _WIN32
+    UINT_PTR fxTimer_ = 0;
+#else
+    std::thread fxThread_;  // started with the first click, ends with the page
+    std::mutex fxMu_;
+    std::condition_variable fxCv_;
+    bool fxRun_ = false, fxQuit_ = false;
+#endif
 
     // Every translatable text on the page (control, property, text) - set again by Retranslate()
     struct BoundText {
@@ -228,20 +292,130 @@ public:
         return p.Get();  // a tab sheet is a IAIMPUIWinControl
     }
 
-    // The author's picture (embedded PNG with rounded corners, drawn at 64 x 64 like in Discord RP)
+    // The author's picture (embedded PNG, drawn at 64 x 64 with rounded corners like in Discord RP) in a
+    // paint box: a click on the head says "pat", one on the nose "boop!" (same as in Discord RP)
     void Avatar(IAIMPUIWinControl* parent, int x, int y, int size) {
-        auto img = Make<IAIMPUIImage>(parent, IID_IAIMPUIImage, x, y, size, size, false);
         Ptr<IAIMPMemoryStream> ms;
         Ptr<IAIMPImage> pic;
-        if (!img || Failed(Core()->CreateObject(IID_IAIMPMemoryStream, ms.OutV())) || !ms ||
-            Failed(Core()->CreateObject(IID_IAIMPImage, pic.OutV())) || !pic)
+        if (Succeeded(Core()->CreateObject(IID_IAIMPMemoryStream, ms.OutV())) && ms &&
+            Succeeded(Core()->CreateObject(IID_IAIMPImage, pic.OutV())) && pic) {
+            DWORD written = 0;
+            ms->Write((void*)kAvatarPng, (DWORD)sizeof(kAvatarPng), &written);
+            ms->Seek(0, AIMP_STREAM_SEEKMODE_FROM_BEGINNING);
+            if (Succeeded(pic->LoadFromStream(ms.Get()))) avatar_ = pic;
+        }
+        avatarEvents_ = new PaintEvents();
+        avatarEvents_->AddRef();
+        avatarEvents_->draw = [this](HCANVAS canvas, const RECT& r) { DrawAvatar(canvas, r); };
+        avatarEvents_->mouse = [this](int what, int mx, int my) { AvatarMouse(what, mx, my); };
+        if (!parent || Failed(ui_->CreateControl(form_.Get(), parent, nullptr, static_cast<AimpDrawEvents*>(avatarEvents_),
+                                                 IID_IAIMPUIPaintBox, pbAvatar_.OutV())) || !pbAvatar_)
             return;
-        DWORD written = 0;
-        ms->Write((void*)kAvatarPng, (DWORD)sizeof(kAvatarPng), &written);
-        ms->Seek(0, AIMP_STREAM_SEEKMODE_FROM_BEGINNING);
-        if (Failed(pic->LoadFromStream(ms.Get()))) return;
-        img->SetValueAsInt32(AIMPUI_IMAGE_PROPID_IMAGESTRETCHMODE, AIMP_IMAGE_DRAW_STRETCHMODE_FIT | AIMP_IMAGE_DRAW_QUALITY_HIGH);
-        img->SetValueAsObject(AIMPUI_IMAGE_PROPID_IMAGE, pic.Get());
+        Place(pbAvatar_.Get(), x, y, size, size);
+    }
+
+    void DrawAvatar(HCANVAS canvas, const RECT& r) {
+        if (!avatar_) return;
+        DrawRoundedImage(canvas, r, avatar_.Get(), 10);
+        if (fxSpot_ >= 0) {
+            const AvatarSpot& a = kAvatarSpots[fxSpot_];
+            DrawAvatarFx(canvas, r, a.text, a.ax, a.ay, a.rise, (float)(NowMs() - fxStart_) / kAvatarFxMs);
+        }
+    }
+
+    // A click (down and up in the same area) plays the area's word, from the start again on every click
+    void AvatarMouse(int what, int x, int y) {
+        if (!avatar_ || !pbAvatar_) return;  // nothing to click on without the picture
+        int hit = -1;
+        TAIMPUIControlPlacement pl;  // the mouse comes in the units of the placement, not in pixels (AIMP scales)
+        memset(&pl, 0, sizeof(pl));
+        const int w = Succeeded(pbAvatar_->GetPlacement(&pl)) ? pl.Bounds.right - pl.Bounds.left : 0;
+        const int h = pl.Bounds.bottom - pl.Bounds.top;
+        if (what != 3 && w > 0 && h > 0) {
+            const float px = x / (float)w, py = y / (float)h;
+            for (int i = 0; i < (int)(sizeof(kAvatarSpots) / sizeof(kAvatarSpots[0])); ++i) {
+                const AvatarSpot& a = kAvatarSpots[i];
+                if (px >= a.x0 && px < a.x1 && py >= a.y0 && py < a.y1) hit = i;
+            }
+        }
+        if (what == 1) fxPressed_ = hit;
+        if (what == 2 && hit >= 0 && hit == fxPressed_) {
+            fxSpot_ = hit;
+            fxStart_ = NowMs();
+            StartFx();
+            pbAvatar_->Invalidate();
+        }
+        if (what >= 2) fxPressed_ = -1;
+    }
+
+    // The frame whose animation runs (the timer has no window of ours)
+    static OptionsFrame*& FxFrame() {
+        static OptionsFrame* f = nullptr;
+        return f;
+    }
+#ifdef _WIN32
+    static void CALLBACK FxTimer(HWND, UINT, UINT_PTR, DWORD) {
+        if (FxFrame()) FxFrame()->TickFx();
+    }
+#endif
+
+    // Next frame of the animation; the last one shows the picture alone again
+    void TickFx() {
+        if (fxSpot_ < 0) return;
+        if (NowMs() - fxStart_ >= kAvatarFxMs) {
+            fxSpot_ = -1;
+            StopFx(false);
+        }
+        if (pbAvatar_) pbAvatar_->Invalidate();
+    }
+
+    // About 30 frames a second: Windows a timer on this (the main) thread, Linux a thread that asks AIMP's
+    // main thread for the next frame
+    void StartFx() {
+        FxFrame() = this;
+#ifdef _WIN32
+        if (!fxTimer_) fxTimer_ = SetTimer(nullptr, 0, 30, FxTimer);
+#else
+        {
+            std::lock_guard<std::mutex> lk(fxMu_);
+            fxRun_ = true;
+        }
+        fxCv_.notify_one();
+        if (!fxThread_.joinable())
+            fxThread_ = std::thread([this] {
+                std::unique_lock<std::mutex> lk(fxMu_);
+                while (!fxQuit_) {
+                    if (!fxRun_) {
+                        fxCv_.wait(lk);
+                        continue;
+                    }
+                    fxCv_.wait_for(lk, std::chrono::milliseconds(30));
+                    if (fxRun_ && !fxQuit_) {
+                        lk.unlock();
+                        engine_->Later([] { if (FxFrame()) FxFrame()->TickFx(); });
+                        lk.lock();
+                    }
+                }
+            });
+#endif
+    }
+
+    void StopFx(bool quit) {  // quit: the page goes away
+        if (FxFrame() == this) FxFrame() = nullptr;
+#ifdef _WIN32
+        if (fxTimer_) KillTimer(nullptr, fxTimer_);
+        fxTimer_ = 0;
+        (void)quit;
+#else
+        {
+            std::lock_guard<std::mutex> lk(fxMu_);
+            fxRun_ = false;
+            fxQuit_ = fxQuit_ || quit;
+        }
+        fxCv_.notify_one();
+        if (quit && fxThread_.joinable()) fxThread_.join();
+        if (quit) fxQuit_ = false;  // the next page starts its own thread
+#endif
     }
 
     static tstring PlatformName() {
@@ -421,8 +595,8 @@ public:
 #endif
         // Bit-perfect mode (every platform): switches off AIMP's own sound processing, restores it when off
         cbBp_ = Check(o, "Bit-perfect mode (switch off AIMP's sound processing)", 10, y, 455);              y += 22;
-        Label(o, "Turns off crossfade, equalizer, effects and ReplayGain. Unticking brings your old settings back.",
-              28, y, 437, 34);                                                                               y += 36;
+        lbBpInfo_ = Label(o, "Turns off crossfade, equalizer, effects and ReplayGain. Unticking brings your old settings back.",
+                          28, y, 437, 34);                                                                               y += 36;
         cbBpVolume_ = Check(o, "Set AIMP's volume to 100 %", 28, y, 437);                                     y += 22;
         cbBpGapless_ = Check(o, "No gapless playback (short pause between tracks)", 28, y, 437);              y += 24;
 #ifdef _WIN32
@@ -513,7 +687,9 @@ public:
             title->SetValueAsInt32(AIMPUI_LABEL_PROPID_TEXTSIZE, 13);
         }
         Label(a, Tx([] { return Trf("Version %1", {AR_T(AR_VERSION)}) + AR_T(" – ") + PlatformName(); }), 86, 36, 379);
-        Link(a, Tx([] { return Trf("by %1 (RainBowFl4sh on GitHub)", {AR_T(AR_AUTHOR)}); }), AR_T(AR_URL_AUTHOR), 86, 56, 379);
+        Link(a, Tx([] { return Trf("by %1 (RainBowFl4sh on GitHub)", {AR_T(AR_AUTHOR)}); }), AR_T(AR_URL_AUTHOR), 86, 56, 239);
+        auto donate = Link(a, "Support this plugin", AR_T(AR_URL_DONATE), 330, 56, 135);  // quiet, at the right edge
+        if (donate) donate->SetValueAsInt32(AIMPUI_LABEL_PROPID_TEXTALIGN, AIMPUI_ALIGN_FAR);
         y = 84;
         Link(a, "GitHub page", AR_T(AR_URL_GITHUB), 10, y, 140);
         Link(a, "All releases", AR_T(AR_URL_RELEASES), 160, y, 140);
@@ -663,6 +839,12 @@ public:
         bool bp = Checked(cbBp_.Get());  // the options appear once the mode is ticked
         Show(cbBpVolume_.Get(), bp);
         Show(cbBpGapless_.Get(), bp);
+        bool on = Checked(cbEnabled_.Get());  // greyed out while the plugin is disabled (General tab)
+        Enable(cbBp_.Get(), on);
+        Enable(lbBpInfo_.Get(), on);
+        Enable(cbBpVolume_.Get(), on);
+        Enable(cbBpGapless_.Get(), on);
+        RefreshBitPerfect();
 #ifdef _WIN32
         bool vm = Checked(cbVm_.Get());
         Enable(cbVmEngine_.Get(), vm);
@@ -774,7 +956,7 @@ public:
             auto& vm = win::Voicemeeter::Get();
             const win::VmDevice& d = vmDevices_[i - 1];
             if (vm.SetBusDevice(0, d)) {
-                if (c.vmAsioRate && d.type == 5) vm.SetFloat("Option.ASIOsr", 1.0f);
+                if (c.vmAsioRate && d.type == 5) vm.FollowEngineRateOnAsio();
                 Log(AR_T("Voicemeeter A1 -> ") + d.Label());
             } else {
                 Log(AR_T("Voicemeeter A1 could not be set (is Voicemeeter running?)"));
@@ -795,12 +977,15 @@ public:
         tstring names;
         for (const char* n : engine_->bitPerfect.PendingNames(engine_->cfg)) names += (names.empty() ? tstring() : tstring(AR_T(", "))) + Tr(n);
         tstring text;
+        bool on = Checked(cbEnabled_.Get());
 #ifdef _WIN32
         if (!names.empty()) text = Trf("Changed when AIMP restarts: %1.", {names});
         Show(btBpRestart_.Get(), !names.empty());
+        Enable(btBpRestart_.Get(), on);
 #else
         if (!names.empty()) text = Trf("Please switch off in AIMP's sound effects: %1.", {names});
 #endif
+        if (!on) text = Tr("Only works while Prevent Resampling is enabled (General tab).");
         SetText(lbBpStatus_.Get(), AIMPUI_LABEL_PROPID_TEXT, text);
     }
 
@@ -1089,12 +1274,21 @@ public:
         // Release all references to controls first, then destroy the form
         cbEnabled_.Reset(); cbMultiples_.Reset(); cbRestore_.Reset(); cbAutoTiming_.Reset();
         cbRestart_.Reset(); cbSeamless_.Reset(); cbAsioForce_.Reset();
-        cbBp_.Reset(); cbBpVolume_.Reset(); cbBpGapless_.Reset(); lbBpStatus_.Reset(); btBpRestart_.Reset();
+        cbBp_.Reset(); cbBpVolume_.Reset(); cbBpGapless_.Reset(); lbBpStatus_.Reset(); btBpRestart_.Reset(); lbBpInfo_.Reset();
         cbVm_.Reset(); cbVmEngine_.Reset(); cbVmAllBuses_.Reset(); cbVmAsio_.Reset();
         spSettle_.Reset(); coAimpOut_.Reset(); coMode_.Reset(); coWinDev_.Reset(); coAsio_.Reset(); coVmA1_.Reset();
         edExtra_.Reset(); lbVmStatus_.Reset(); memo_.Reset(); btRefresh_.Reset(); btReset_.Reset(); btTest_.Reset();
         cbUpdate_.Reset(); cbAutoInstall_.Reset(); coInterval_.Reset(); btCheck_.Reset(); btInstall_.Reset();
         lbUpdate_.Reset(); lnNotes_.Reset(); memoChangelog_.Reset();
+        StopFx(true);
+        fxSpot_ = fxPressed_ = -1;
+        if (avatarEvents_) {  // AIMP may keep its reference a little longer: no calls into this page any more
+            avatarEvents_->draw = nullptr;
+            avatarEvents_->mouse = nullptr;
+            avatarEvents_->Release();
+            avatarEvents_ = nullptr;
+        }
+        pbAvatar_.Reset(); avatar_.Reset();
         coLang_.Reset(); btExport_.Reset(); btImport_.Reset();
         texts_.clear();
         lastChangelog_.clear();

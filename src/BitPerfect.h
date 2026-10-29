@@ -67,7 +67,8 @@ public:
     static const TChar* Section() { return AR_T("BitPerfectSaved"); }
 
     // Brings AIMP in line with the settings: neutral values while the mode is on, the saved values
-    // back as soon as it (or one of its options) is off. Called at start-up and after saving the page.
+    // back as soon as it (or one of its options, or the whole plugin) is off. Called at start-up and
+    // after saving the page.
     void Apply(const Config& cfg) {
         auto player = Service<IAIMPServicePlayer>(IID_IAIMPServicePlayer);
         auto disp = Service<IAIMPServiceMessageDispatcher>(IID_IAIMPServiceMessageDispatcher);
@@ -76,7 +77,7 @@ public:
         Ini& ini = Ini::Get();
         changed_.clear();
         restored_.clear();
-        bool on = cfg.bitPerfect;
+        bool on = cfg.BitPerfectOn();
 
         // Volume: 1.0 = 100 %
         if (player)
@@ -144,7 +145,7 @@ public:
             const TChar* path = nullptr;
             if (!AimpConfigInt(k[i], &cur, &path)) continue;
             int want = cur;
-            if (cfg.bitPerfect) want = 0;
+            if (cfg.BitPerfectOn()) want = 0;
             else if (ini.Has(Section(), k[i].saved)) want = (int)ini.Int(Section(), k[i].saved, cur);
             if (want != cur && want >= 0) r.push_back({path, want});
         }

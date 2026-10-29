@@ -252,7 +252,7 @@ public:
             if (engineChange) {
                 if (vm.SetFloat("Option.sr", (float)d.rate)) vmSet_ = d.rate;
                 else Log(L"Voicemeeter: could not set Option.sr");
-                if (cfg_.vmAsioRate) vm.SetFloat("Option.ASIOsr", 1.0f);
+                if (cfg_.vmAsioRate) vm.FollowEngineRateOnAsio();
             }
             // The engine has to restart to use a new rate or to reopen devices with a new format
             if (engineChange || formatsChanged) {
@@ -285,6 +285,9 @@ public:
                 Log(L"Voicemeeter: could not set Option.sr back");
                 engine = false;
             }
+            // Option.ASIOsr as well (set by "ASIO device on A1 follows the engine rate"); the engine
+            // restart below makes Voicemeeter use it
+            bool asio = vm.AsioRateOriginal() >= 0 && vm.Running() && vm.RestoreAsioRate();
             bool restored = false;
             for (auto& o : original_) {
                 bool r = win::SetDeviceFormat(o.first, o.second);
@@ -294,7 +297,7 @@ public:
             // Voicemeeter has to reopen its devices (A1-A5) after their Windows format changed - otherwise
             // a WDM output stays red unless "Auto restart audio engine" is ticked in Voicemeeter.
             // Wait until the engine runs again: logging out right away can drop the pending command.
-            if (vmRunning && (engine || restored)) {
+            if ((vmRunning || asio) && (engine || restored || asio)) {
                 int64_t t0 = NowMs();
                 vm.Restart();
                 uint32_t target = engine ? vmOriginalRate_ : 0;
@@ -304,9 +307,11 @@ public:
                     Log(L"Voicemeeter: engine rate restored to " + Khz(vmOriginalRate_) +
                         (ready ? L" in " + Num(NowMs() - t0) + L" ms" : std::wstring(L" (engine did not confirm the rate)")));
                 else
-                    Log(L"Voicemeeter: engine restarted after restoring the device formats");
+                    Log(restored ? L"Voicemeeter: engine restarted after restoring the device formats"
+                                 : L"Voicemeeter: engine restarted after restoring Option.ASIOsr");
             }
         }
+        win::Voicemeeter::Get().ForgetAsioRate();
         original_.clear();
         vmOriginalRate_ = 0;
         vmSet_ = 0;
@@ -332,6 +337,8 @@ public:
         ini.Set(sec, AR_T("VoicemeeterOriginal"), (long long)vmOriginalRate_);
         ini.Set(sec, AR_T("VoicemeeterSet"), (long long)vmSet_);
         ini.SetBool(sec, AR_T("VoicemeeterUsed"), vmUsed_);
+        float asioSr = win::Voicemeeter::Get().AsioRateOriginal();
+        if (asioSr >= 0) ini.Set(sec, AR_T("VoicemeeterAsioOriginal"), (long long)asioSr);
         ini.Set(sec, AR_T("Saved"), (long long)time(nullptr));
         ini.Save();
         Log(L"Restart: kept the current rates, remembered " + Num(n) + L" original device format(s)" +
@@ -339,6 +346,7 @@ public:
         original_.clear();
         vmOriginalRate_ = vmSet_ = 0;
         vmUsed_ = false;
+        win::Voicemeeter::Get().ForgetAsioRate();
     }
 
     // Takes over the session of the AIMP process before a restart by the plugin (and removes it from the
@@ -366,6 +374,8 @@ public:
             n++;
         }
         if (!vmOriginalRate_) vmOriginalRate_ = (uint32_t)ini.Int(sec, AR_T("VoicemeeterOriginal"), 0);
+        long long asioSr = ini.Int(sec, AR_T("VoicemeeterAsioOriginal"), -1);
+        if (asioSr >= 0 && asioSr <= 1000) win::Voicemeeter::Get().SetAsioRateOriginal((float)asioSr);
         if (fresh) {
             vmSet_ = (uint32_t)ini.Int(sec, AR_T("VoicemeeterSet"), 0);
             vmUsed_ = ini.Bool(sec, AR_T("VoicemeeterUsed"), false);
